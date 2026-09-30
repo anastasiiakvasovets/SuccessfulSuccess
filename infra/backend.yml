@@ -54,35 +54,6 @@ Parameters:
       Lambda refuses any reservation that leaves fewer than 10 unreserved.
       Raise it once the account's limit has been increased.
 
-  DbEngineVersion:
-    Type: String
-    Default: ""
-    Description: >-
-      Aurora PostgreSQL version. Empty uses the region's current default, which
-      supports pausing at 0 ACU (that needs 13.15+, 14.12+, 15.7+ or 16.3+).
-
-  DbMinCapacity:
-    Type: Number
-    Default: 0
-    MinValue: 0
-    Description: >-
-      Lowest Aurora capacity in ACUs. 0 lets the cluster pause when idle, so it
-      bills only for storage until the next connection wakes it (~15 s).
-
-  DbMaxCapacity:
-    Type: Number
-    Default: 1
-    MinValue: 1
-    Description: >-
-      Highest Aurora capacity in ACUs (1 ACU ~ 2 GB of memory). 1 is the
-      smallest Aurora allows, and plenty for this app.
-
-  DbAutoPauseSeconds:
-    Type: Number
-    Default: 300
-    MinValue: 300
-    MaxValue: 86400
-    Description: Idle seconds before a cluster with DbMinCapacity 0 pauses.
 
   DbName:
     Type: String
@@ -132,7 +103,6 @@ Parameters:
       aws-deploy-backend` downloads them.
 
 Conditions:
-  HasDbEngineVersion: !Not [!Equals [!Ref DbEngineVersion, ""]]
   HasMaxConcurrency: !Not [!Equals [!Ref MaxConcurrency, 0]]
 
 Resources:
@@ -177,44 +147,27 @@ Resources:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
 
-  DbCluster:
-    Type: AWS::RDS::DBCluster
-    # A demo stack: `make aws-destroy` should leave nothing billable behind.
-    # The default (Snapshot) would keep charging for snapshot storage.
-    DeletionPolicy: Delete
-    UpdateReplacePolicy: Delete
-    Properties:
-      DBClusterIdentifier: !Sub "${ProjectName}-db"
-      Engine: aurora-postgresql
-      EngineVersion: !If [HasDbEngineVersion, !Ref DbEngineVersion, !Ref "AWS::NoValue"]
-      DatabaseName: !Ref DbName
-      MasterUsername: !Ref DbUsername
-      MasterUserPassword: !Ref DbPassword
-      DBSubnetGroupName: !Ref DbSubnetGroup
-      VpcSecurityGroupIds:
-        - !Ref DbSecurityGroup
-      StorageEncrypted: true
-      BackupRetentionPeriod: 1        # Aurora's minimum; the continuous backup is free up to the cluster size
-      DeletionProtection: false
-      ServerlessV2ScalingConfiguration:
-        MinCapacity: !Ref DbMinCapacity
-        MaxCapacity: !Ref DbMaxCapacity
-        SecondsUntilAutoPause: !Ref DbAutoPauseSeconds
-      Tags:
-        - Key: PROJECT_NAME
-          Value: !Ref ProjectName
-
-  # Serverless v2 capacity lives on instances; one writer is enough here.
   DbInstance:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Properties:
-      DBInstanceIdentifier: !Sub "${ProjectName}-db-1"
-      DBClusterIdentifier: !Ref DbCluster
-      Engine: aurora-postgresql
-      DBInstanceClass: db.serverless
+      DBInstanceIdentifier: !Sub "${ProjectName}-db"
+      DBInstanceClass: db.t3.micro
+      Engine: postgres
+      EngineVersion: "16"
+      DBName: !Ref DbName
+      MasterUsername: !Ref DbUsername
+      MasterUserPassword: !Ref DbPassword
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DbSecurityGroup
+      StorageEncrypted: true
+      AllocatedStorage: "20"
+      BackupRetentionPeriod: 1
+      DeletionProtection: false
       PubliclyAccessible: false
+      MultiAZ: false
       AutoMinorVersionUpgrade: true
       Tags:
         - Key: PROJECT_NAME
@@ -277,8 +230,8 @@ Resources:
           # Moving it to SSM Parameter Store is the first thing to harden here.
           DATABASE_URL: !Sub
             - "postgresql+asyncpg://${DbUsername}:${DbPassword}@${Endpoint}:${Port}/${DbName}"
-            - Endpoint: !GetAtt DbCluster.Endpoint.Address
-              Port: !GetAtt DbCluster.Endpoint.Port
+            - Endpoint: !GetAtt DbInstance.Endpoint.Address
+              Port: !GetAtt DbInstance.Endpoint.Port
           APP_TIMEZONE: !Ref AppTimezone
           CORS_ORIGINS: !Ref CorsOrigins
           LOG_LEVEL: !Ref LogLevel
@@ -336,8 +289,8 @@ Outputs:
     Description: The function URL's host name
     Value: !Select [2, !Split ["/", !GetAtt FunctionUrl.FunctionUrl]]
   DatabaseEndpoint:
-    Description: Aurora cluster (writer) endpoint, private to the VPC
-    Value: !GetAtt DbCluster.Endpoint.Address
+    Description: RDS PostgreSQL endpoint, private to the VPC
+    Value: !GetAtt DbInstance.Endpoint.Address
   FunctionName:
     Value: !Ref ApiFunction
   LogGroupName:

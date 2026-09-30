@@ -64,20 +64,24 @@ stack-outputs = $(AWS) cloudformation describe-stacks --stack-name $(1) \
 	--query 'Stacks[0].Outputs[].[OutputKey,OutputValue]' --output text
 
 # $(call wait-stack-idle,<stack>)
+# REVIEW_IN_PROGRESS means a changeset exists but was never executed (e.g. a
+# previous deploy was interrupted). It will never self-resolve, so skip it here
+# and let clear-failed-create handle it below.
 wait-stack-idle = while status=$$($(AWS) cloudformation describe-stacks --stack-name $(1) \
 		--query 'Stacks[0].StackStatus' --output text 2>/dev/null | tr -d '[:space:]'); \
-		case "$$status" in *_IN_PROGRESS) true ;; *) false ;; esac; do \
+		case "$$status" in REVIEW_IN_PROGRESS|*_COMPLETE|*_FAILED|"") false ;; *_IN_PROGRESS) true ;; *) false ;; esac; do \
 		echo "$(1) is $$status — waiting for it to settle..."; sleep 30; done
 
-# A stack whose first create failed sits in ROLLBACK_COMPLETE, which
-# CloudFormation can only delete. It holds no resources, so clear it and let the
-# deploy start over.
+# A stack whose first create failed (ROLLBACK_COMPLETE) or whose changeset was
+# never executed (REVIEW_IN_PROGRESS) must be deleted before CloudFormation
+# can deploy fresh. Neither holds resources, so it is safe to remove.
 # $(call clear-failed-create,<stack>)
-clear-failed-create = if [ "$$($(AWS) cloudformation describe-stacks --stack-name $(1) \
-		--query 'Stacks[0].StackStatus' --output text 2>/dev/null | tr -d '[:space:]')" = ROLLBACK_COMPLETE ]; then \
-		echo "$(1) failed to create earlier — deleting it before retrying"; \
+clear-failed-create = status=$$($(AWS) cloudformation describe-stacks --stack-name $(1) \
+		--query 'Stacks[0].StackStatus' --output text 2>/dev/null | tr -d '[:space:]'); \
+		case "$$status" in ROLLBACK_COMPLETE|REVIEW_IN_PROGRESS) \
+		echo "$(1) is in $$status — deleting it before retrying"; \
 		$(AWS) cloudformation delete-stack --stack-name $(1) && \
-		$(AWS) cloudformation wait stack-delete-complete --stack-name $(1); fi
+		$(AWS) cloudformation wait stack-delete-complete --stack-name $(1) ;; esac
 
 # Fail early and clearly when .env has no credentials in it.
 define require-aws-credentials
