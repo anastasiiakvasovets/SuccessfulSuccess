@@ -27,13 +27,15 @@ export function AuthLoading({ label = "Checking your session…" }: { label?: st
 
 /** Renders its children only for a signed-in user; everyone else goes to the login page. */
 export function RequireAuth({ children }: { children: React.ReactNode }) {
-  const { status } = useAuth()
+  const { status, signingOut } = useAuth()
   const router = useRouter()
 
   useEffect(() => {
-    if (status === "signedOut") router.replace("/")
-  }, [status, router])
+    // Signing out navigates on its own (to Cognito's /logout, then "/").
+    if (status === "signedOut" && !signingOut) router.replace("/login/")
+  }, [status, signingOut, router])
 
+  if (signingOut) return <AuthLoading label="Signing out…" />
   if (status !== "signedIn") {
     return <AuthLoading label={status === "loading" ? undefined : "Redirecting to sign in…"} />
   }

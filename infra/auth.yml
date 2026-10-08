@@ -11,13 +11,26 @@ Parameters:
     Default: successfulsuccess
     Description: Prefix for the names of the resources in this stack.
 
-  AppUrls:
+  DomainPrefix:
+    Type: String
+    Default: ""
+    Description: >-
+      Prefix of Cognito's OAuth domain, https://<prefix>.auth.<region>.amazoncognito.com.
+      Unique per region across all accounts, and part of the Google client's
+      redirect URI. Empty uses "<ProjectName>-<account id>".
+
+  CallbackUrls:
+    Type: CommaDelimitedList
+    Default: "http://localhost:3000/auth/callback/"
+    Description: >-
+      Where Cognito may send people back after signing in, one
+      <origin>/auth/callback/ per origin the site is served from (local dev
+      server and the CloudFront site). Exact match, trailing slash included.
+
+  LogoutUrls:
     Type: CommaDelimitedList
     Default: "http://localhost:3000/"
-    Description: >-
-      Every URL the site is served from, each ending in "/": Cognito sends
-      people back there after signing in with Google or signing out. Include
-      the local dev server and the CloudFront site.
+    Description: Where Cognito may send people back after signing out, <origin>/ per origin.
 
   GoogleClientId:
     Type: String
@@ -34,6 +47,7 @@ Parameters:
 
 Conditions:
   HasGoogle: !Not [!Equals [!Ref GoogleClientId, ""]]
+  HasDomainPrefix: !Not [!Equals [!Ref DomainPrefix, ""]]
 
 Resources:
   UserPool:
@@ -43,6 +57,9 @@ Resources:
       # People sign in with their email address; Cognito mails them a code to
       # confirm it on sign-up and to reset a forgotten password.
       UsernameAttributes: [email]
+      # Anyone may sign up on their own.
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
       AutoVerifiedAttributes: [email]
       UsernameConfiguration:
         CaseSensitive: false
@@ -67,6 +84,9 @@ Resources:
       # before real traffic arrives.
       EmailConfiguration:
         EmailSendingAccount: COGNITO_DEFAULT
+      # Essentials is what managed login (version 2) needs; free up to 10,000
+      # monthly active users.
+      UserPoolTier: ESSENTIALS
       UserPoolTags:
         PROJECT_NAME: !Ref ProjectName
 
@@ -76,8 +96,18 @@ Resources:
     Type: AWS::Cognito::UserPoolDomain
     Properties:
       UserPoolId: !Ref UserPool
-      # Domain prefixes are unique per region across all accounts.
-      Domain: !Sub "${ProjectName}-${AWS::AccountId}"
+      Domain: !If [HasDomainPrefix, !Ref DomainPrefix, !Sub "${ProjectName}-${AWS::AccountId}"]
+      # 2 = managed login (the newer hosted pages), styled by ManagedLoginBranding.
+      ManagedLoginVersion: 2
+
+  # Cognito's default look for the managed login pages of the web client.
+  ManagedLoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    DependsOn: UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientId: !Ref UserPoolClient
+      UseCognitoProvidedValues: true
 
   GoogleIdentityProvider:
     Type: AWS::Cognito::UserPoolIdentityProvider
@@ -94,6 +124,7 @@ Resources:
         email: email
         email_verified: email_verified
         name: name
+        username: sub
 
   # Public client for the browser: no secret, SRP for passwords (the password
   # never leaves the browser), and the authorization-code flow with PKCE for
@@ -124,8 +155,8 @@ Resources:
       AllowedOAuthFlowsUserPoolClient: true
       AllowedOAuthFlows: [code]
       AllowedOAuthScopes: [openid, email, profile]
-      CallbackURLs: !Ref AppUrls
-      LogoutURLs: !Ref AppUrls
+      CallbackURLs: !Ref CallbackUrls
+      LogoutURLs: !Ref LogoutUrls
 
 Outputs:
   UserPoolId:
@@ -135,6 +166,12 @@ Outputs:
   Issuer:
     Description: The "iss" of every token; its signing keys are at <Issuer>/.well-known/jwks.json
     Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+  Authority:
+    Description: OIDC authority; <Authority>/.well-known/openid-configuration describes it
+    Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+  CognitoDomain:
+    Description: Cognito's OAuth domain as a URL (managed login, /logout)
+    Value: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
   HostedDomain:
     Description: Cognito's OAuth domain, which the frontend sends Google sign-in through
     Value: !Sub "${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"

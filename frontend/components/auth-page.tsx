@@ -7,10 +7,10 @@ import {
   resendSignUpCode,
   resetPassword,
   signIn,
-  signInWithRedirect,
   signUp,
 } from "aws-amplify/auth"
 import { AlertCircle, ArrowLeft, Clock, Eye, EyeOff, MailCheck, Sparkles, Users } from "lucide-react"
+import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useEffect, useState } from "react"
 import { useForm } from "react-hook-form"
@@ -24,7 +24,7 @@ import { Button } from "@/components/ui/button"
 import { FieldSeparator } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { authConfig, authErrorMessage, configureAuth, isAuthConfigured } from "@/lib/auth"
+import { authErrorMessage, isAuthConfigured, isGoogleConfigured, signInWithGoogle } from "@/lib/auth"
 
 /** Which card the page shows. `email` carries over between steps. */
 type Step =
@@ -516,13 +516,12 @@ export function AuthPage() {
   }, [status, router])
 
   const onGoogle = async () => {
-    if (!authConfig.googleEnabled || !authConfig.domain) {
+    if (!isGoogleConfigured) {
       toast.info("Google sign-in isn't enabled on this deployment yet.")
       return
     }
     try {
-      configureAuth()
-      await signInWithRedirect({ provider: "Google" })
+      await signInWithGoogle()
     } catch (caught) {
       toast.error(authErrorMessage(caught))
     }
@@ -615,8 +614,11 @@ export function AuthPage() {
               ) : null}
 
               <p className="text-muted-foreground mt-6 text-center text-xs leading-relaxed">
-                By continuing, you agree to the SuccessfulSuccess Terms of Use and
-                acknowledge the Privacy Policy.
+                By continuing, you acknowledge the{" "}
+                <Link href="/privacy/" className="hover:text-foreground underline">
+                  Privacy Policy
+                </Link>
+                .
               </p>
             </div>
           </div>

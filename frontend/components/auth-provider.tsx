@@ -3,11 +3,12 @@
 import { useQueryClient } from "@tanstack/react-query"
 import { Hub } from "aws-amplify/utils"
 import { fetchAuthSession, signOut as amplifySignOut } from "aws-amplify/auth"
+import { useRouter } from "next/navigation"
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { syncMe } from "@/lib/api"
-import { authErrorMessage, configureAuth, isAuthConfigured } from "@/lib/auth"
+import { authConfig, authErrorMessage, configureAuth, isAuthConfigured } from "@/lib/auth"
 
 export type AuthUser = {
   sub: string
@@ -21,6 +22,8 @@ type AuthState =
   | { status: "signedIn"; user: AuthUser }
 
 type AuthContextValue = AuthState & {
+  /** True from "Sign out" until the browser has left for Cognito's /logout. */
+  signingOut: boolean
   refresh: () => Promise<void>
   signOut: () => Promise<void>
 }
@@ -47,9 +50,32 @@ async function loadUser(): Promise<{ user: AuthUser; idToken: string } | null> {
   }
 }
 
+/** Drops Amplify's tokens and OAuth flags by hand, for when signOut() itself failed. */
+function clearLocalSession() {
+  try {
+    for (const key of Object.keys(window.localStorage)) {
+      if (key.startsWith("CognitoIdentityServiceProvider.")) window.localStorage.removeItem(key)
+    }
+  } catch {
+    // Storage unavailable: nothing was persisted there either.
+  }
+}
+
+/** Cognito's /logout ends the managed-login session, then comes back to "/". */
+function cognitoLogoutUrl(): string | null {
+  if (!authConfig.domain) return null
+  const params = new URLSearchParams({
+    client_id: authConfig.clientId,
+    logout_uri: `${window.location.origin}/`,
+  })
+  return `https://${authConfig.domain}/logout?${params}`
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient()
+  const router = useRouter()
   const [state, setState] = useState<AuthState>({ status: "loading", user: null })
+  const [signingOut, setSigningOut] = useState(false)
 
   // The sub whose profile was already stored this page load.
   const syncedSub = useRef<string | null>(null)
@@ -84,6 +110,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         case "signInWithRedirect":
           // Another user's meetings must never show from the cache.
           queryClient.clear()
+          setSigningOut(false)
           void refresh()
           break
         case "signedOut":
@@ -99,15 +126,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     })
   }, [queryClient, refresh])
 
+  // While this runs, RequireAuth must not send the page to /login/: that page
+  // starts a new sign-in, which cancels the navigation to /logout, and Cognito's
+  // still-valid session signs the user straight back in.
   const signOut = useCallback(async () => {
+    setSigningOut(true)
+    queryClient.clear()
     try {
+      // Clears the local tokens; after a managed-login sign-in it also starts
+      // the same /logout navigation as below.
       await amplifySignOut()
     } catch (error) {
+      clearLocalSession()
+      setState({ status: "signedOut", user: null })
       toast.error(authErrorMessage(error))
+      router.replace("/")
+      return
     }
-  }, [])
+    const logoutUrl = cognitoLogoutUrl()
+    if (logoutUrl) {
+      window.location.assign(logoutUrl)
+    } else {
+      router.replace("/")
+    }
+  }, [queryClient, router])
 
-  const value = useMemo(() => ({ ...state, refresh, signOut }), [state, refresh, signOut])
+  const value = useMemo(
+    () => ({ ...state, signingOut, refresh, signOut }),
+    [state, signingOut, refresh, signOut],
+  )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

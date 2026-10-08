@@ -26,26 +26,53 @@ Then open:
 
 The backend applies migrations on start.
 
-### Sign-in (Cognito)
+### Authentication (Cognito)
 
-Every page except the login page, and every `/api/v1` endpoint, needs a
+Every page except `/`, `/login/`, `/auth/callback/` and `/privacy/`, and every `/api/v1` endpoint, needs a
 signed-in user, and each user sees only their own meetings. Sign-in is an AWS
 Cognito user pool (`infra/auth.yml`): email + password, and Google when it is
 configured. Even for local development the pool lives in AWS (it is free at
 this scale):
 
 ```bash
-make aws-deploy-auth   # create/update the user pool; allows http://localhost:$FRONTEND_PORT/
+make aws-deploy-auth   # create/update the user pool and its app client
 make aws-auth-env      # prints COGNITO_* lines: paste them into .env
 docker compose up -d   # restart so the API and the frontend pick them up
 ```
 
-**Google sign-in** (optional): in Google Cloud console create an OAuth client of
-type *Web application*, put its id and secret in `.env` as `GOOGLE_CLIENT_ID` /
-`GOOGLE_CLIENT_SECRET`, run `make aws-deploy-auth`, and add the redirect URI it
-prints (`https://<prefix>.auth.<region>.amazoncognito.com/oauth2/idpresponse`)
-to the client's *Authorized redirect URIs*. Without it the Google button says
-Google sign-in is not enabled.
+**`.env` variables** (never commit `.env`; the Google secret only goes to
+CloudFormation as a `NoEcho` parameter, never into the frontend build):
+
+| Variable | What it is |
+| --- | --- |
+| `COGNITO_DOMAIN_PREFIX` | Cognito's sign-in domain, `https://<prefix>.auth.<region>.amazoncognito.com`. Unique per region; empty uses `<PROJECT_NAME>-<account id>` |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | The Google OAuth client. Empty: email + password only |
+| `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `COGNITO_DOMAIN`, `COGNITO_GOOGLE_ENABLED` | Local development only, from `make aws-auth-env`. The AWS build reads them from the auth stack itself |
+
+**Google client**: in Google Cloud console → *APIs & Services* → *Credentials*,
+create an OAuth client of type *Web application* (publish the consent screen, or
+add yourself as a test user). Its *Authorized redirect URI* is Cognito's, not the
+site's: `https://<COGNITO_DOMAIN_PREFIX>.auth.<region>.amazoncognito.com/oauth2/idpresponse`
+(`make aws-deploy-auth` prints it). Put the id and secret in `.env`.
+
+**Redirect URLs**: `aws-deploy-auth` registers `<origin>/auth/callback/` (sign-in)
+and `<origin>/` (sign-out) on the app client for every origin the site is served
+from: the CloudFront domain (read from the frontend stack's outputs once it
+exists), `AWS_FRONTEND_DOMAIN` if set, and `http://localhost:$FRONTEND_PORT`.
+Cognito compares them exactly, so `trailingSlash` is on in dev as well.
+
+**Deploy order**: `aws-deploy-auth` → `aws-deploy-backend` (it needs the pool to
+check tokens) → `aws-deploy-frontend` (it re-runs `aws-deploy-auth` so the
+CloudFront URL is allowed, then bakes the pool's ids into the build; without an
+auth stack it builds with sign-in hidden). `make aws-deploy` runs all three.
+
+**Testing**: open `<site>/login/`. Sign up with an email (Cognito mails a code),
+or press *Continue with Google*: Google → Cognito → `<site>/auth/callback/`, which
+shows "Signing in…" and then `/today` (or the error, visibly). The header shows
+your email and *Sign out*, which also ends the Cognito session. Checks:
+`curl -I <site>/login/` (and `/auth/callback/`, `/privacy/`) returns 200;
+`<Authority>/.well-known/openid-configuration` (the auth stack's `Authority`
+output) loads; `make aws-auth-env` prints the ids.
 
 The first time someone signs in, the frontend sends their ID token to
 `POST /api/v1/me/sync`, which stores their profile (email, name, picture,
@@ -164,7 +191,8 @@ AWS_REGION=us-east-1
 PROJECT_NAME=successfulsuccess   # prefixes every resource name, and the PROJECT_NAME tag
 AWS_DB_PASSWORD=...          # 8-41 chars, [A-Za-z0-9_-] only
 AWS_CORS_ORIGINS=            # empty: follow the frontend's URLs (* until it exists)
-GOOGLE_CLIENT_ID=            # optional: Google sign-in (see "Sign-in" above)
+COGNITO_DOMAIN_PREFIX=       # optional: Cognito sign-in domain prefix (see "Authentication" above)
+GOOGLE_CLIENT_ID=            # optional: Google sign-in
 GOOGLE_CLIENT_SECRET=
 AWS_FRONTEND_DOMAIN=         # optional, e.g. app.example.com
 ```

@@ -1,5 +1,5 @@
 import { Amplify } from "aws-amplify"
-import { fetchAuthSession } from "aws-amplify/auth"
+import { fetchAuthSession, signInWithRedirect } from "aws-amplify/auth"
 // Completes Google sign-in when Cognito redirects back to the app.
 import "aws-amplify/auth/enable-oauth-listener"
 
@@ -15,10 +15,16 @@ export const isAuthConfigured = Boolean(authConfig.userPoolId && authConfig.clie
 
 let configured = false
 
-/** Idempotent; browser only, because the OAuth redirect URLs use the page's origin. */
+export const isGoogleConfigured = isAuthConfigured && authConfig.googleEnabled && !!authConfig.domain
+
+/**
+ * Idempotent; browser only, because the OAuth redirect URLs use the page's origin.
+ * Both must be listed on the app client exactly (see aws-deploy-auth in the Makefile).
+ */
 export function configureAuth() {
   if (configured || !isAuthConfigured || typeof window === "undefined") return
   const home = `${window.location.origin}/`
+  const callback = `${window.location.origin}/auth/callback/`
   Amplify.configure({
     Auth: {
       Cognito: {
@@ -31,7 +37,7 @@ export function configureAuth() {
                 oauth: {
                   domain: authConfig.domain,
                   scopes: ["openid", "email", "profile"],
-                  redirectSignIn: [home],
+                  redirectSignIn: [callback],
                   redirectSignOut: [home],
                   responseType: "code" as const,
                 },
@@ -42,6 +48,12 @@ export function configureAuth() {
     },
   })
   configured = true
+}
+
+/** Off to Google via Cognito; the browser comes back to /auth/callback/. */
+export async function signInWithGoogle() {
+  configureAuth()
+  await signInWithRedirect({ provider: "Google" })
 }
 
 /** The current access token, refreshed by Amplify when it is about to expire. */

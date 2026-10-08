@@ -161,10 +161,20 @@ aws-deploy: ## Deploy everything: sign-in, then the backend, then the frontend b
 
 aws-deploy-auth: ## Create/update the Cognito user pool (email + password; Google when GOOGLE_CLIENT_ID is set)
 	$(require-aws-credentials)
-	@urls="http://localhost:$(or $(FRONTEND_PORT),3000)/"; \
-		site=$$($(call stack-output,$(FRONTEND_STACK),AllowedOrigins) 2>/dev/null | tr -d '[:space:]'); \
-		case "$$site" in ""|None) ;; *) urls="$$urls,$$(echo "$$site" | sed 's|,|/,|g')/" ;; esac; \
-		echo "Sign-in redirect URLs: $$urls"; \
+	@# Every origin the site is served from: the CloudFront site (once the
+	@# frontend stack exists), the custom domain if set, and the dev server.
+	@origins=""; \
+		cf=$$($(call stack-output,$(FRONTEND_STACK),DistributionDomain) 2>/dev/null | tr -d '[:space:]'); \
+		case "$$cf" in ""|None) echo "No frontend stack yet — sign-in redirects to localhost only" ;; \
+			*) origins="https://$$cf" ;; esac; \
+		test -z "$(AWS_FRONTEND_DOMAIN)" || origins="$$origins https://$(AWS_FRONTEND_DOMAIN)"; \
+		origins="$$origins http://localhost:$(or $(FRONTEND_PORT),3000)"; \
+		callbacks=""; logouts=""; \
+		for origin in $$origins; do \
+			callbacks="$$callbacks,$$origin/auth/callback/"; logouts="$$logouts,$$origin/"; done; \
+		callbacks=$${callbacks#,}; logouts=$${logouts#,}; \
+		echo "Sign-in callback URLs: $$callbacks"; \
+		echo "Sign-out URLs: $$logouts"; \
 		test -n "$(GOOGLE_CLIENT_ID)" || echo "GOOGLE_CLIENT_ID is empty — Google sign-in stays off"; \
 		$(call wait-stack-idle,$(AUTH_STACK)); \
 		$(call clear-failed-create,$(AUTH_STACK)); \
@@ -175,7 +185,9 @@ aws-deploy-auth: ## Create/update the Cognito user pool (email + password; Googl
 			$(STACK_TAGS) \
 			--parameter-overrides \
 				"ProjectName=$(PROJECT_NAME)" \
-				"AppUrls=$$urls" \
+				"DomainPrefix=$(COGNITO_DOMAIN_PREFIX)" \
+				"CallbackUrls=$$callbacks" \
+				"LogoutUrls=$$logouts" \
 				"GoogleClientId=$(GOOGLE_CLIENT_ID)" \
 				"GoogleClientSecret=$(GOOGLE_CLIENT_SECRET)"
 	@if [ -n "$(GOOGLE_CLIENT_ID)" ]; then \
@@ -317,7 +329,8 @@ aws-deploy-frontend: ## Deploy the frontend to S3 + CloudFront, built against th
 	@# Now that the site's URL exists, let Cognito redirect back to it.
 	@$(MAKE) --no-print-directory aws-deploy-auth
 	@api=$$($(call stack-output,$(APP_STACK),ApiUrl) | tr -d '[:space:]'); \
-		auth=$$($(call stack-outputs,$(AUTH_STACK)) | tr -d '\r'); \
+		auth=$$($(call stack-outputs,$(AUTH_STACK)) 2>/dev/null | tr -d '\r'); \
+		test -n "$$auth" || echo "No auth stack — building without sign-in"; \
 		auth_out() { printf '%s\n' "$$auth" | awk -F '\t' -v k="$$1" '$$1 == k { print $$2 }'; }; \
 		bucket=$$($(call stack-output,$(FRONTEND_STACK),BucketName) | tr -d '[:space:]'); \
 		dist=$$($(call stack-output,$(FRONTEND_STACK),DistributionId) | tr -d '[:space:]'); \

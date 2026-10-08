@@ -9,7 +9,9 @@ const nextConfig: NextConfig = {
   output: isExport ? "export" : "standalone",
   // A folder per route (meetings/new/index.html) is served at a clean URL by
   // any static host, with no rewrite from /meetings/new to meetings/new.html.
-  trailingSlash: isExport,
+  // On in dev too, so the sign-in callback is /auth/callback/ everywhere and
+  // matches the URL registered on the Cognito app client exactly.
+  trailingSlash: true,
 };
 
 export default nextConfig;
