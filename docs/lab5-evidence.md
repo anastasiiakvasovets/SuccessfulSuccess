@@ -51,3 +51,20 @@ $ aws s3 ls s3://successfulsuccess-reports-980553487282/reports/ --recursive
 2026-10-13 20:05:05        645 reports/2026-W40.csv
 2026-10-13 19:55:11        622 reports/2026-W41.csv
 ```
+
+## Trigger 3: S3 upload (the mailer)
+
+`make report-now WEEK=2026-W41` at 2026-10-13 17:13 UTC (`MessageId 12ac0ceb-c153-4744-b8ab-7131cd423b38`).
+The builder, started by the SQS message, overwrote `reports/2026-W41.csv`:
+
+```json
+{"timestamp": "2026-10-13T17:13:43Z", "level": "INFO", "message": "report-builder triggered", "logger": "meetings.reports", "requestId": "2bbf8246-83ec-5232-9302-e10eeb112196", "trigger": "sqs", "week": "2026-W41", "source": "manual", "messageId": "12ac0ceb-c153-4744-b8ab-7131cd423b38", "receiveCount": 1}
+```
+
+That upload's `ObjectCreated:Put` event started `successfulsuccess-report-mailer` (outside the VPC),
+which sent the CSV through SES:
+
+```json
+{"timestamp": "2026-10-13T17:13:45Z", "level": "INFO", "message": "report-mailer triggered", "logger": "meetings.mailer", "requestId": "ee06300a-f522-49b2-b121-29ba7724011c", "trigger": "s3", "bucket": "successfulsuccess-reports-980553487282", "key": "reports/2026-W41.csv", "eventName": "ObjectCreated:Put", "sequencer": "006ACE66C81B4AE099"}
+{"timestamp": "2026-10-13T17:13:45Z", "level": "INFO", "message": "report emailed", "logger": "meetings.mailer", "requestId": "ee06300a-f522-49b2-b121-29ba7724011c", "trigger": "s3", "key": "reports/2026-W41.csv", "sesMessageId": "010001a1364184ad-cbc3ddad-8806-4ef4-992b-b9c8d1ad2ba6-000000"}
+```

@@ -102,13 +102,17 @@ Resources:
 
   # --- storage --------------------------------------------------------------
 
-  # Named explicitly, so the mailer's S3 permission (Step 5) can build the ARN
-  # without referencing the bucket, which would be a circular dependency.
   # Emptied by `make aws-destroy` before the stack goes.
   ReportsBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
+    # S3 checks that it may invoke the mailer when the notification is set, so
+    # the permission must exist first. The permission names the bucket in its
+    # SourceArn; with !GetAtt ReportsBucket.Arn the two would depend on each
+    # other (a circular dependency). The bucket's name is built from known
+    # values instead, so the permission's ARN needs nothing from the bucket.
+    DependsOn: MailerInvokePermission
     Properties:
       BucketName: !Sub "${ProjectName}-reports-${AWS::AccountId}"
       PublicAccessBlockConfiguration:
@@ -129,6 +133,19 @@ Resources:
             Status: Enabled
             Prefix: reports/
             ExpirationInDays: 90
+      # A new report is an event; the mailer reacts to it. The builder does not
+      # know the mailer exists.
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt ReportMailer.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: reports/
+                  - Name: suffix
+                    Value: .csv
       Tags:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
@@ -278,6 +295,157 @@ Resources:
       BatchSize: 1
       Enabled: true
 
+  # --- mailer ---------------------------------------------------------------
+
+  # Outside the VPC, so it reaches SES over the internet; it never touches the
+  # database. It may read reports but never write them: a function triggered
+  # by uploads to reports/ that uploads to reports/ would call itself forever.
+  MailerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: read-reports-send-email
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${ProjectName}-reports-${AWS::AccountId}/reports/*"
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: !Sub "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/*"
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  MailerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-report-mailer"
+      RetentionInDays: 7
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  ReportMailer:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-report-mailer"
+      Description: Emails each new weekly report CSV through SES
+      Runtime: python3.12
+      Handler: index.handler
+      Architectures: [x86_64]
+      Role: !GetAtt MailerRole.Arn
+      MemorySize: 256
+      Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref MailerLogGroup
+        LogFormat: JSON
+      Environment:
+        Variables:
+          SENDER: !Ref SenderEmail
+          # Comma-separated; in the SES sandbox every address must be verified.
+          RECIPIENTS: !Ref ReportRecipient
+      Code:
+        ZipFile: |
+          """Email each new report: S3 ObjectCreated on reports/*.csv -> SES."""
+
+          import csv
+          import io
+          import logging
+          import os
+          import posixpath
+          import urllib.parse
+          from email.message import EmailMessage
+
+          import boto3
+
+          log = logging.getLogger("meetings.mailer")
+          log.setLevel(logging.INFO)
+          s3 = boto3.client("s3")
+          ses = boto3.client("sesv2")
+
+
+          def summary_line(text):
+              """One sentence from the CSV's summary section (a header row, then values)."""
+              rows = list(csv.reader(io.StringIO(text)))
+              start = rows.index(["section", "summary"])
+              s = dict(zip(rows[start + 1], rows[start + 2]))
+              return (
+                  f"{s['meetings']} meetings, {s['hours']} hours. "
+                  f"Previous week {s['previous_week']}: {s['previous_meetings']} meetings, "
+                  f"{s['previous_hours']} hours (change {s['change_meetings']} meetings, "
+                  f"{s['change_hours']} hours)."
+              )
+
+
+          def handler(event, context):
+              sender = os.environ["SENDER"]
+              recipients = [a.strip() for a in os.environ["RECIPIENTS"].split(",") if a.strip()]
+              sent = []
+              for record in event["Records"]:
+                  bucket = record["s3"]["bucket"]["name"]
+                  key = urllib.parse.unquote_plus(record["s3"]["object"]["key"])
+                  log.info(
+                      "report-mailer triggered",
+                      extra={
+                          "trigger": "s3",
+                          "bucket": bucket,
+                          "key": key,
+                          "eventName": record["eventName"],
+                          "sequencer": record["s3"]["object"].get("sequencer"),
+                      },
+                  )
+                  data = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+                  filename = posixpath.basename(key)
+                  week = filename.removesuffix(".csv")
+
+                  msg = EmailMessage()
+                  msg["Subject"] = f"Weekly meetings report {week}"
+                  msg["From"] = sender
+                  msg["To"] = ", ".join(recipients)
+                  msg.set_content(
+                      f"The meetings report for {week} is attached.\n\n"
+                      f"{summary_line(data.decode('utf-8'))}\n"
+                  )
+                  msg.add_attachment(data, maintype="text", subtype="csv", filename=filename)
+
+                  response = ses.send_email(
+                      FromEmailAddress=sender,
+                      Destination={"ToAddresses": recipients},
+                      Content={"Raw": {"Data": msg.as_bytes()}},
+                  )
+                  log.info(
+                      "report emailed",
+                      extra={"trigger": "s3", "key": key, "sesMessageId": response["MessageId"]},
+                  )
+                  sent.append({"key": key, "messageId": response["MessageId"]})
+              return {"sent": sent}
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  # Lets S3 invoke the mailer, for this bucket in this account only. The ARN is
+  # built from the bucket's name, not !GetAtt (see ReportsBucket's DependsOn).
+  MailerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ReportMailer.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:s3:::${ProjectName}-reports-${AWS::AccountId}"
+      SourceAccount: !Ref AWS::AccountId
+
   # --- schedule -------------------------------------------------------------
 
   SchedulerRole:
@@ -342,3 +510,5 @@ Outputs:
     Value: !GetAtt ReportRequests.Arn
   DlqUrl:
     Value: !Ref ReportRequestsDlq
+  MailerFunctionName:
+    Value: !Ref ReportMailer
