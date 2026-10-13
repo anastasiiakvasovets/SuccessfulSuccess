@@ -66,6 +66,15 @@ Parameters:
       When the weekly report is built, in Europe/Kyiv time. rate(5 minutes)
       for testing; set it back afterwards.
 
+  FailWeek:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^\\d{4}-W\\d{2}$"
+    ConstraintDescription: must be empty or an ISO week like 2026-W01
+    Description: >-
+      Testing only: the builder raises for this week, so its message is retried
+      and lands in the dead-letter queue. Empty in normal use.
+
 Conditions:
   HasSeparateRecipient: !Not [!Equals [!Ref SenderEmail, !Ref ReportRecipient]]
 
@@ -139,6 +148,44 @@ Resources:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
 
+  # --- queue ----------------------------------------------------------------
+
+  # Messages the builder failed on three times wait here, for 14 days, instead
+  # of disappearing. The console's "Start DLQ redrive" moves them back.
+  ReportRequestsDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-report-requests-dlq"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      # Only the main queue may use this one as its DLQ. Its ARN is built from
+      # its name: !GetAtt would be circular, since the main queue's
+      # RedrivePolicy already points here.
+      RedriveAllowPolicy:
+        redrivePermission: byQueue
+        sourceQueueArns:
+          - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${ProjectName}-report-requests"
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  # One entry point for every report request: the schedule, `make report-now`
+  # and, later, the API all send {"week": ..., "source": ...} here.
+  ReportRequests:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ProjectName}-report-requests"
+      # At least 6x the builder's timeout, so a message cannot become visible
+      # again, and start a second builder, while the first is still running.
+      VisibilityTimeout: 360
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ReportRequestsDlq.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
   # --- builder --------------------------------------------------------------
 
   BuilderRole:
@@ -161,6 +208,18 @@ Resources:
               - Effect: Allow
                 Action: s3:PutObject
                 Resource: !Sub "arn:${AWS::Partition}:s3:::${ProjectName}-reports-${AWS::AccountId}/reports/*"
+        # The Lambda service polls the queue with this role; the function itself
+        # never connects to SQS, which is why it needs no NAT or SQS endpoint.
+        - PolicyName: read-report-requests
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt ReportRequests.Arn
       Tags:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
@@ -204,9 +263,20 @@ Resources:
           APP_TIMEZONE: Europe/Kyiv
           LOG_LEVEL: INFO
           REPORTS_BUCKET: !Ref ReportsBucket
+          FAIL_WEEK: !Ref FailWeek
       Tags:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
+
+  # One message per invocation: a failure retries (and dead-letters) that one
+  # report only. The mapping takes no tags here.
+  ReportRequestsMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt ReportRequests.Arn
+      FunctionName: !Ref ReportBuilder
+      BatchSize: 1
+      Enabled: true
 
   # --- schedule -------------------------------------------------------------
 
@@ -223,13 +293,13 @@ Resources:
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
       Policies:
-        - PolicyName: invoke-report-builder
+        - PolicyName: send-report-requests
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: lambda:InvokeFunction
-                Resource: !GetAtt ReportBuilder.Arn
+                Action: sqs:SendMessage
+                Resource: !GetAtt ReportRequests.Arn
       Tags:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
@@ -247,10 +317,12 @@ Resources:
       FlexibleTimeWindow:
         Mode: "OFF"
       State: ENABLED
+      # A command on the queue, not a direct invoke: retries and the DLQ come
+      # with it. week null means "the week before", decided by the builder.
       Target:
-        Arn: !GetAtt ReportBuilder.Arn
+        Arn: !GetAtt ReportRequests.Arn
         RoleArn: !GetAtt SchedulerRole.Arn
-        Input: '{"source": "schedule"}'
+        Input: '{"week": null, "source": "schedule"}'
 
 Outputs:
   SenderIdentity:
@@ -263,3 +335,10 @@ Outputs:
     Value: !Ref ReportBuilder
   BuilderLogGroup:
     Value: !Ref BuilderLogGroup
+  QueueUrl:
+    Description: Where `make report-now` sends report requests
+    Value: !Ref ReportRequests
+  QueueArn:
+    Value: !GetAtt ReportRequests.Arn
+  DlqUrl:
+    Value: !Ref ReportRequestsDlq

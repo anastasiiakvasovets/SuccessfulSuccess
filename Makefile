@@ -43,6 +43,9 @@ REPORTS_STACK ?= $(PROJECT_NAME)-reports
 # When the weekly report is built (Europe/Kyiv). Try it out with
 # make aws-deploy-reports SCHEDULE="rate(5 minutes)", then deploy again without it.
 SCHEDULE ?= cron(0 7 ? * MON *)
+# Testing the dead-letter queue: make aws-deploy-reports FAIL_WEEK=2026-W01 makes
+# the builder raise for that week. Any deploy without it clears it again.
+FAIL_WEEK ?=
 IMAGE_TAG ?= latest
 # x86_64 or arm64. arm64 is ~20% cheaper on Lambda and builds natively on
 # Apple Silicon; the image platform is derived from it so the two cannot drift.
@@ -102,7 +105,8 @@ endef
 
 .PHONY: help up up-build down down-v logs ps migrate revision seed seed-weeks report-local test lint fmt shell-backend psql \
         aws-whoami aws-deploy aws-deploy-auth aws-auth-env aws-ecr aws-push aws-deploy-backend aws-migrate aws-url aws-status aws-logs \
-        aws-frontend-cert aws-deploy-frontend aws-frontend-url aws-deploy-reports aws-destroy
+        aws-frontend-cert aws-deploy-frontend aws-frontend-url aws-deploy-reports report-now dlq-status \
+        aws-destroy
 
 help:
 	@grep -hE '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -417,12 +421,36 @@ aws-deploy-reports: aws-push ## Deploy the weekly report: SES identities, bucket
 				"SecurityGroupId=$$sg" \
 				ImageUri="$$repo@$$digest" \
 				"DatabaseUrl=$$dburl" \
-				"ScheduleExpression=$(SCHEDULE)"
+				"ScheduleExpression=$(SCHEDULE)" \
+				"FailWeek=$(FAIL_WEEK)"
 	@$(AWS) cloudformation describe-stacks --stack-name $(REPORTS_STACK) \
 		--query 'Stacks[0].Outputs' --output table
 	@echo "SES identities (each stays Pending until its verification link is clicked):"
 	@$(AWS) sesv2 list-email-identities \
 		--query 'EmailIdentities[].[IdentityName,VerificationStatus]' --output text
+
+report-now: ## Queue a report for one week: make report-now WEEK=2026-W40
+	@printf '%s' "$(WEEK)" | grep -Eqx '[0-9]{4}-W[0-9]{2}' || { \
+		echo "Usage: make report-now WEEK=2026-W40 (an ISO week, YYYY-Www)"; exit 1; }
+	@url=$$($(call stack-output,$(REPORTS_STACK),QueueUrl) 2>/dev/null | tr -d '[:space:]'); \
+		case "$$url" in ""|None) echo "No report queue — run: make aws-deploy-reports"; exit 1 ;; esac; \
+		id=$$($(AWS) sqs send-message --queue-url "$$url" \
+			--message-body '{"week":"$(WEEK)","source":"manual"}' \
+			--query MessageId --output text | tr -d '[:space:]') || exit 1; \
+		echo "Queued $(WEEK): MessageId $$id"
+
+dlq-status: ## Show how many messages wait in the report queue and its dead-letter queue
+	@outputs=$$($(call stack-outputs,$(REPORTS_STACK)) | tr -d '\r'); \
+		for key in QueueUrl DlqUrl; do \
+			url=$$(printf '%s\n' "$$outputs" | awk -F '\t' -v k="$$key" '$$1 == k { print $$2 }'); \
+			test -n "$$url" || { echo "No $$key output — run: make aws-deploy-reports"; exit 1; }; \
+			counts=$$($(AWS) sqs get-queue-attributes --queue-url "$$url" \
+				--attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+				--query 'Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]' \
+				--output text | tr -d '\r'); \
+			set -- $$counts; \
+			printf '%-55s waiting=%s in-flight=%s\n' "$${url##*/}" "$$1" "$$2"; \
+		done
 
 aws-destroy: ## Delete every stack, including the database and its data
 	$(require-aws-credentials)
