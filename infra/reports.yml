@@ -1,9 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   Weekly meetings report: built from the database on a schedule or on demand,
-  saved as a CSV on S3 and emailed through SES. So far only the SES identities:
-  the account is in the SES sandbox, so both the sender and the recipient must
-  be verified addresses. No domain, so no DKIM records.
+  saved as a CSV on S3 and emailed through SES. The builder runs in the
+  backend's VPC (it needs the database) with no NAT, and reaches S3 through a
+  gateway endpoint. The account is in the SES sandbox, so both the sender and
+  the recipient must be verified addresses. No domain, so no DKIM records.
 
 Parameters:
   ProjectName:
@@ -26,6 +27,44 @@ Parameters:
     Description: >-
       Where reports go (REPORT_RECIPIENT in .env). In the sandbox it must be
       verified too; when it equals SenderEmail, that one identity covers both.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The backend function's VPC (`make aws-deploy-reports` reads it from the function).
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: The backend function's subnets; the builder attaches to the same ones.
+
+  RouteTableIds:
+    Type: CommaDelimitedList
+    Description: >-
+      Route tables of those subnets. The S3 gateway endpoint adds its route to
+      each; without it the builder's PutObject hangs until the timeout.
+
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >-
+      The backend function's security group. The database only accepts 5432
+      from it, so the builder uses it too.
+
+  ImageUri:
+    Type: String
+    Description: >-
+      Backend image, pinned by digest: <account>.dkr.ecr.<region>.amazonaws.com/<repo>@sha256:...
+      The builder runs the same image with a different handler.
+
+  DatabaseUrl:
+    Type: String
+    NoEcho: true
+    Description: The backend function's DATABASE_URL (postgresql+asyncpg://...).
+
+  ScheduleExpression:
+    Type: String
+    Default: cron(0 7 ? * MON *)
+    Description: >-
+      When the weekly report is built, in Europe/Kyiv time. rate(5 minutes)
+      for testing; set it back afterwards.
 
 Conditions:
   HasSeparateRecipient: !Not [!Equals [!Ref SenderEmail, !Ref ReportRecipient]]
@@ -52,8 +91,175 @@ Resources:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
 
+  # --- storage --------------------------------------------------------------
+
+  # Named explicitly, so the mailer's S3 permission (Step 5) can build the ARN
+  # without referencing the bucket, which would be a circular dependency.
+  # Emptied by `make aws-destroy` before the stack goes.
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub "${ProjectName}-reports-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-reports
+            Status: Enabled
+            Prefix: reports/
+            ExpirationInDays: 90
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  # Free, unlike an interface endpoint or a NAT gateway: a route to S3's prefix
+  # list in each route table. Every S3 request from the VPC now takes it.
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Gateway
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcId: !Ref VpcId
+      RouteTableIds: !Ref RouteTableIds
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-s3"
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  # --- builder --------------------------------------------------------------
+
+  BuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Write logs, and manage the network interfaces a VPC function needs.
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: write-reports
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${ProjectName}-reports-${AWS::AccountId}/reports/*"
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  BuilderLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-report-builder"
+      RetentionInDays: 7
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  ReportBuilder:
+    Type: AWS::Lambda::Function
+    # The endpoint must be routable before the first PutObject.
+    DependsOn: S3Endpoint
+    Properties:
+      FunctionName: !Sub "${ProjectName}-report-builder"
+      Description: Builds the weekly meetings report CSV and saves it to S3
+      PackageType: Image
+      Code:
+        ImageUri: !Ref ImageUri
+      ImageConfig:
+        Command: ["app.reports.lambda_handler.handler"]
+      Architectures: [x86_64]
+      Role: !GetAtt BuilderRole.Arn
+      MemorySize: 512
+      Timeout: 60
+      LoggingConfig:
+        LogGroup: !Ref BuilderLogGroup
+        LogFormat: JSON
+      VpcConfig:
+        SubnetIds: !Ref SubnetIds
+        SecurityGroupIds:
+          - !Ref SecurityGroupId
+      Environment:
+        Variables:
+          # Same caveat as the API: the password is readable in the function configuration.
+          DATABASE_URL: !Ref DatabaseUrl
+          APP_TIMEZONE: Europe/Kyiv
+          LOG_LEVEL: INFO
+          REPORTS_BUCKET: !Ref ReportsBucket
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  # --- schedule -------------------------------------------------------------
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: scheduler.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: invoke-report-builder
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt ReportBuilder.Arn
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  # Schedules take no tags.
+  WeeklySchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub "${ProjectName}-weekly-report"
+      Description: Build last week's meetings report every Monday morning
+      ScheduleExpression: !Ref ScheduleExpression
+      # Without it the cron runs in UTC, and the report arrives at 9 or 10
+      # o'clock Kyiv time depending on daylight saving.
+      ScheduleExpressionTimezone: Europe/Kyiv
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt ReportBuilder.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"source": "schedule"}'
+
 Outputs:
   SenderIdentity:
     Value: !Ref SenderIdentity
   RecipientIdentity:
     Value: !If [HasSeparateRecipient, !Ref RecipientIdentity, !Ref SenderIdentity]
+  BucketName:
+    Value: !Ref ReportsBucket
+  BuilderFunctionName:
+    Value: !Ref ReportBuilder
+  BuilderLogGroup:
+    Value: !Ref BuilderLogGroup

@@ -40,6 +40,9 @@ APP_STACK ?= $(PROJECT_NAME)-backend
 ECR_STACK ?= $(PROJECT_NAME)-ecr
 FRONTEND_STACK ?= $(PROJECT_NAME)-frontend
 REPORTS_STACK ?= $(PROJECT_NAME)-reports
+# When the weekly report is built (Europe/Kyiv). Try it out with
+# make aws-deploy-reports SCHEDULE="rate(5 minutes)", then deploy again without it.
+SCHEDULE ?= cron(0 7 ? * MON *)
 IMAGE_TAG ?= latest
 # x86_64 or arm64. arm64 is ~20% cheaper on Lambda and builds natively on
 # Apple Silicon; the image platform is derived from it so the two cannot drift.
@@ -373,11 +376,30 @@ aws-deploy-frontend: ## Deploy the frontend to S3 + CloudFront, built against th
 aws-frontend-url: ## Print the deployed site URL
 	@$(call stack-output,$(FRONTEND_STACK),SiteUrl)
 
-aws-deploy-reports: ## Create/update the weekly report stack (SES identities for REPORT_SENDER and REPORT_RECIPIENT)
+aws-deploy-reports: aws-push ## Deploy the weekly report: SES identities, bucket, S3 endpoint, builder Lambda, schedule
 	$(require-aws-credentials)
 	@test -n "$(REPORT_SENDER)" -a -n "$(REPORT_RECIPIENT)" || { \
 		echo "REPORT_SENDER / REPORT_RECIPIENT are empty — set them in .env"; exit 1; }
-	@$(call wait-stack-idle,$(REPORTS_STACK)); \
+	@# The builder joins the API function's network and database, so read them
+	@# from that function. DATABASE_URL holds the password: never echo it.
+	@fn=$(PROJECT_NAME)-backend; \
+		net=$$($(AWS) lambda get-function-configuration --function-name "$$fn" \
+			--query '[VpcConfig.VpcId, join(`,`, VpcConfig.SubnetIds), VpcConfig.SecurityGroupIds[0]]' \
+			--output text 2>/dev/null | tr -d '\r'); \
+		set -- $$net; vpc=$$1; subnets=$$2; sg=$$3; \
+		case "$$vpc" in ""|None) echo "No $$fn function in a VPC — run: make aws-deploy-backend"; exit 1 ;; esac; \
+		dburl=$$($(AWS) lambda get-function-configuration --function-name "$$fn" \
+			--query 'Environment.Variables.DATABASE_URL' --output text | tr -d '\r\n'); \
+		case "$$dburl" in ""|None) echo "$$fn has no DATABASE_URL"; exit 1 ;; esac; \
+		rtbs=$$($(AWS) ec2 describe-route-tables --filters Name=vpc-id,Values=$$vpc \
+			--query 'join(`,`, RouteTables[].RouteTableId)' --output text | tr -d '[:space:]'); \
+		repo=$$($(call stack-output,$(ECR_STACK),RepositoryUri) | tr -d '[:space:]'); \
+		digest=$$($(AWS) ecr describe-images --repository-name "$${repo#*/}" \
+			--image-ids imageTag=$(IMAGE_TAG) --query 'imageDetails[0].imageDigest' \
+			--output text | tr -d '[:space:]'); \
+		echo "vpc=$$vpc subnets=$$subnets sg=$$sg route tables=$$rtbs"; \
+		echo "image=$$repo@$$digest schedule=$(SCHEDULE)"; \
+		$(call wait-stack-idle,$(REPORTS_STACK)); \
 		$(call clear-failed-create,$(REPORTS_STACK)); \
 		$(AWS) cloudformation deploy \
 			--stack-name $(REPORTS_STACK) \
@@ -388,15 +410,24 @@ aws-deploy-reports: ## Create/update the weekly report stack (SES identities for
 			--parameter-overrides \
 				"ProjectName=$(PROJECT_NAME)" \
 				"SenderEmail=$(REPORT_SENDER)" \
-				"ReportRecipient=$(REPORT_RECIPIENT)"
+				"ReportRecipient=$(REPORT_RECIPIENT)" \
+				"VpcId=$$vpc" \
+				"SubnetIds=$$subnets" \
+				"RouteTableIds=$$rtbs" \
+				"SecurityGroupId=$$sg" \
+				ImageUri="$$repo@$$digest" \
+				"DatabaseUrl=$$dburl" \
+				"ScheduleExpression=$(SCHEDULE)"
+	@$(AWS) cloudformation describe-stacks --stack-name $(REPORTS_STACK) \
+		--query 'Stacks[0].Outputs' --output table
 	@echo "SES identities (each stays Pending until its verification link is clicked):"
 	@$(AWS) sesv2 list-email-identities \
 		--query 'EmailIdentities[].[IdentityName,VerificationStatus]' --output text
 
 aws-destroy: ## Delete every stack, including the database and its data
 	$(require-aws-credentials)
-	@printf 'Delete %s, %s, %s and %s? The Aurora cluster and all its data, and every user account, go with them (no snapshot). Type yes: ' \
-		"$(FRONTEND_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
+	@printf 'Delete %s, %s, %s, %s and %s? The database and all its data, every user account and every saved report go with them (no snapshot). Type yes: ' \
+		"$(FRONTEND_STACK)" "$(REPORTS_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
 		read answer; test "$$answer" = "yes" || { echo "Aborted."; exit 1; }
 	@bucket=$$($(call stack-output,$(FRONTEND_STACK),BucketName) 2>/dev/null | tr -d '[:space:]'); \
 		if [ -n "$$bucket" ] && [ "$$bucket" != "None" ]; then \
@@ -405,6 +436,15 @@ aws-destroy: ## Delete every stack, including the database and its data
 		fi
 	-$(AWS) cloudformation delete-stack --stack-name $(FRONTEND_STACK)
 	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(FRONTEND_STACK)
+	@# Before the backend: the builder uses the backend's security group and subnets.
+	@bucket=$$($(call stack-output,$(REPORTS_STACK),BucketName) 2>/dev/null | tr -d '[:space:]'); \
+		if [ -n "$$bucket" ] && [ "$$bucket" != "None" ]; then \
+			echo "Emptying s3://$$bucket"; \
+			$(AWS) s3 rm "s3://$$bucket" --recursive --only-show-errors || true; \
+		fi
+	@echo "Deleting $(REPORTS_STACK) — the builder's VPC network interfaces can take ~20 minutes to go."
+	-$(AWS) cloudformation delete-stack --stack-name $(REPORTS_STACK)
+	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(REPORTS_STACK)
 	@echo "Deleting $(APP_STACK) — Lambda releases its VPC network interfaces slowly, allow ~20 minutes."
 	$(AWS) cloudformation delete-stack --stack-name $(APP_STACK)
 	$(AWS) cloudformation wait stack-delete-complete --stack-name $(APP_STACK)

@@ -83,9 +83,8 @@ defaulting to `successfulsuccess`.
   explicit association, so all six use it. Routes: `172.31.0.0/16 → local`,
   `0.0.0.0/0 → igw-06a8f4f804954e7b8`. The internet route does not help the Lambda: VPC Lambda ENIs
   get no public IP, and there is **no NAT gateway**.
-- VPC endpoints: **none**. There is no S3 gateway endpoint yet; `infra/reports.yml` must create it
-  (`com.amazonaws.us-east-1.s3`, `RouteTableIds: [rtb-0fda711f924ebbb89]`). Look the route table up
-  at deploy time rather than hardcoding it, like the Makefile does for the VPC and subnets.
+- VPC endpoints: before Lab 5, none. `infra/reports.yml` creates the S3 gateway endpoint
+  (`com.amazonaws.us-east-1.s3`) on the route tables `make aws-deploy-reports` looks up for the VPC.
 - Security group of the function: `sg-06b7e429066e1c5f3` (`FunctionSecurityGroup`, no inbound,
   all outbound). The database's SG `sg-050a697dbe192fd34` allows 5432 only from that group, so the
   report builder must use `sg-06b7e429066e1c5f3` (or the DB SG must get a new ingress rule).
@@ -100,8 +99,8 @@ defaulting to `successfulsuccess`.
   with `uv pip install -r pyproject.toml`, copies `alembic.ini`, `alembic/`, `app/`).
   Default `CMD ["app.lambda_handler.handler"]`. A second handler is selected with
   `ImageConfig: { Command: ["app.reports.lambda_handler.handler"] }`.
-- `boto3` is not in `pyproject.toml`; the Lambda Python base image ships it. Locally (compose image)
-  it is absent.
+- `boto3` is only in the `dev` dependency group (tests, compose image): the Lambda Python base image
+  ships it, and `Dockerfile.lambda` installs only `[project].dependencies`.
 - Repository `980553487282.dkr.ecr.us-east-1.amazonaws.com/successfulsuccess-backend`
   (`successfulsuccess-ecr` output `RepositoryUri`). Lifecycle keeps the 5 newest images.
 - `make aws-push`: `ecr get-login-password | docker login`, then
