@@ -97,7 +97,7 @@ define require-db-password
 		exit 1; }
 endef
 
-.PHONY: help up up-build down down-v logs ps migrate revision seed test lint fmt shell-backend psql \
+.PHONY: help up up-build down down-v logs ps migrate revision seed seed-weeks report-local test lint fmt shell-backend psql \
         aws-whoami aws-deploy aws-deploy-auth aws-auth-env aws-ecr aws-push aws-deploy-backend aws-migrate aws-url aws-status aws-logs \
         aws-frontend-cert aws-deploy-frontend aws-frontend-url aws-deploy-reports aws-destroy
 
@@ -131,6 +131,13 @@ revision: ## Autogenerate a migration: make revision m="add column"
 seed: ## Insert demo meetings for today for one user: make seed owner=<cognito-sub>
 	@test -n "$(owner)" || { echo "Usage: make seed owner=<cognito-sub> (the user's sub from the Cognito console)"; exit 1; }
 	$(COMPOSE) exec backend python -m app.seed "$(owner)"
+
+seed-weeks: ## Insert ~15 demo meetings over the last two ISO weeks, for the weekly report (once)
+	$(COMPOSE) exec backend python -m app.reports.seed_weeks
+
+report-local: ## Print one week's report from the local database: make report-local WEEK=2026-W41
+	@test -n "$(WEEK)" || { echo "Usage: make report-local WEEK=2026-W41 (an ISO week)"; exit 1; }
+	@$(COMPOSE) exec -T backend python -m app.reports "$(WEEK)"
 
 test: ## Run the backend test suite against a throwaway database
 	$(COMPOSE) exec db psql -U app -d postgres -tc \
