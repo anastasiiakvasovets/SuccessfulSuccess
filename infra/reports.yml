@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Weekly meetings report: built from the database on a schedule or on demand,
+  saved as a CSV on S3 and emailed through SES. So far only the SES identities:
+  the account is in the SES sandbox, so both the sender and the recipient must
+  be verified addresses. No domain, so no DKIM records.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: successfulsuccess
+    Description: Prefix for the names of the resources in this stack.
+
+  SenderEmail:
+    Type: String
+    AllowedPattern: "[^@\\s]+@[^@\\s]+\\.[^@\\s]+"
+    ConstraintDescription: must be an email address
+    Description: >-
+      The address reports are sent from (REPORT_SENDER in .env). SES mails it a
+      verification link when the identity is created.
+
+  ReportRecipient:
+    Type: String
+    AllowedPattern: "[^@\\s]+@[^@\\s]+\\.[^@\\s]+"
+    ConstraintDescription: must be an email address
+    Description: >-
+      Where reports go (REPORT_RECIPIENT in .env). In the sandbox it must be
+      verified too; when it equals SenderEmail, that one identity covers both.
+
+Conditions:
+  HasSeparateRecipient: !Not [!Equals [!Ref SenderEmail, !Ref ReportRecipient]]
+
+Resources:
+  # --- email ----------------------------------------------------------------
+
+  # Creating an email identity sends a verification link to the address; it
+  # stays Pending until that link is clicked.
+  SenderIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref SenderEmail
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  RecipientIdentity:
+    Type: AWS::SES::EmailIdentity
+    Condition: HasSeparateRecipient
+    Properties:
+      EmailIdentity: !Ref ReportRecipient
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+Outputs:
+  SenderIdentity:
+    Value: !Ref SenderIdentity
+  RecipientIdentity:
+    Value: !If [HasSeparateRecipient, !Ref RecipientIdentity, !Ref SenderIdentity]
