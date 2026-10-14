@@ -168,6 +168,37 @@ S3 sends a new `ObjectCreated` event for each one (note the different `sequencer
 to every event, and sending an email is not idempotent: each send is a new email. So the builder step
 is safe to repeat, the mailer step is not. Answer (a) in `lab5-answers.md` is how to fix that.
 
+## Final S3 listing (for submission)
+
+So that the bucket shows a report built by the schedule again, the schedule was deployed with
+`make aws-deploy-reports SCHEDULE="rate(5 minutes)"` (2026-10-14 09:01:16 UTC) and, right after its
+first run, set back to `cron(0 7 ? * MON *)` in Europe/Kyiv (09:03:29 UTC), so it fired exactly once.
+It sent `{"week": null, "source": "schedule"}` to SQS; the builder resolved `week: null` to the
+previous ISO week, 2026-W41:
+
+```json
+{"timestamp": "2026-10-14T09:01:58Z", "level": "INFO", "message": "report-builder triggered", "logger": "meetings.reports", "requestId": "3a19095a-a8ad-5a78-950c-6a13ef9fa25f", "trigger": "sqs", "week": "2026-W41", "source": "schedule", "messageId": "4a46098c-5ee2-47c6-9b2d-3ee7c9a19821", "receiveCount": 1}
+```
+
+The upload started the mailer, which emailed it:
+
+```json
+{"timestamp": "2026-10-14T09:02:00Z", "level": "INFO", "message": "report-mailer triggered", "logger": "meetings.mailer", "requestId": "871a8e14-b0b9-4876-ad8a-65956da7ce71", "trigger": "s3", "bucket": "successfulsuccess-reports-980553487282", "key": "reports/2026-W41.csv", "eventName": "ObjectCreated:Put", "sequencer": "006ACF4506E216F8A1"}
+```
+
+The bucket after that (times are local, UTC+3):
+
+```
+$ aws s3 ls s3://successfulsuccess-reports-980553487282/reports/ --recursive
+2026-10-14 11:49:32        313 reports/2026-W01.csv
+2026-10-14 11:51:02        645 reports/2026-W40.csv
+2026-10-14 12:01:59        622 reports/2026-W41.csv
+```
+
+- `2026-W41.csv` — last written by the **schedule** (EventBridge Scheduler → SQS → builder), above.
+- `2026-W40.csv` — last written by **`make report-now WEEK=2026-W40`** (Step 7, "the same week twice").
+- `2026-W01.csv` — written by the **DLQ redrive** of the failed 2026-W01 request (Step 7).
+
 ## Submission checklist ("What you submit" in lab5.md)
 
 1. **Commit link** — all Lab 5 work, compared with the last Lab 4 commit:
@@ -176,17 +207,8 @@ is safe to repeat, the mailer step is not. Answer (a) in `lab5-answers.md` is ho
    template: `infra/reports.yml` (the mailer handler is inline in it).
 2. **Email screenshot** — by hand: the "Weekly meetings report 2026-W41" email (and later ones) in the
    inbox or Spam, with `2026-W41.csv` attached.
-3. **`aws s3 ls`** — see "Reports in S3" above: `2026-W41.csv` built by the schedule, `2026-W40.csv`
-   by `make report-now`. Later runs (Steps 5 and 7) overwrote both keys on demand; the bucket now:
-
-   ```
-   $ aws s3 ls s3://successfulsuccess-reports-980553487282/reports/ --recursive
-   2026-10-14 11:49:32        313 reports/2026-W01.csv
-   2026-10-14 11:51:02        645 reports/2026-W40.csv
-   2026-10-13 20:13:45        622 reports/2026-W41.csv
-   ```
-
-   The next scheduled run (Monday 2026-10-19 07:00 Kyiv, through SQS) adds `reports/2026-W42.csv`.
+3. **`aws s3 ls`** — see "Final S3 listing (for submission)" above: `2026-W41.csv` last written by
+   the schedule (via SQS), `2026-W40.csv` by `make report-now`, `2026-W01.csv` by the DLQ redrive.
 4. **Three log lines** — Trigger 1 (`trigger: schedule`), Trigger 2 (`trigger: sqs`) and
    Trigger 3 (`trigger: s3`, the mailer) above.
 5. **Written answers** — `docs/lab5-answers.md`.
