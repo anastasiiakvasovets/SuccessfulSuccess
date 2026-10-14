@@ -41,6 +41,16 @@ us-east-1, a month is ~730 hours):
 | SES interface VPC endpoint (`com.amazonaws.us-east-1.email`) | $0.01/h per AZ ≈ **$7.30** per AZ. Our subnets are in 6 AZs: ≈ $43.80; limited to 2 AZs ≈ $14.60 | $0.01 processed | Only SES, traffic stays private |
 | The split we built | **≈ $0** | — | S3 gateway endpoint is free; Lambda, S3 and SQS requests at a few per week are fractions of a cent |
 
+The NAT gateway is more work than it looks in our VPC. Our Lambda subnets are the default VPC's public
+subnets (their route table sends 0.0.0.0/0 to the internet gateway), and a Lambda in a VPC never gets a
+public IP, so that route does nothing for it. A NAT gateway would also need new private subnets with a
+route 0.0.0.0/0 → NAT, and the builder moved into them.
+
+About the endpoint name: `aws ec2 describe-vpc-endpoint-services` in us-east-1 lists
+`com.amazonaws.us-east-1.email` (the SES API, in all 6 AZs), `email-fips` and `email-smtp` (only 3
+AZs). Our code calls the SES API with boto3 (`sesv2.send_email`), so `email` is the one we need.
+`email-smtp` would mean sending through SMTP instead of the API.
+
 With 10 more emails a week I would keep the split. It costs nothing, the parts are small, and the event
 between them (a file in S3) is useful on its own: I can add a Slack notifier without touching the
 builder. Paying $15–65 a month to send 10 emails makes no sense.
@@ -68,7 +78,9 @@ even if I asked for 7 days. Ways to get a link that really lasts a week:
    we already use CloudFront for the frontend.
 3. **Link to an app endpoint** like `/reports/2026-W40`, which checks that the user is signed in and then
    redirects to a fresh presigned URL valid for a few minutes. The link in the email never expires, and
-   only allowed users can open it.
+   only allowed users can open it. The email link should go to a frontend page on the CloudFront URL,
+   because the API expects the Cognito token that the frontend sends; that page calls the API, which
+   returns (or redirects to) the short-lived presigned URL.
 
 I would pick option 3. The link in the email is just a normal URL, access is checked on every click, and
 there is no long-lived secret that can leak. It also fits our API in the VPC with no NAT: presigning is
@@ -83,3 +95,15 @@ few minutes, so temporary credentials are fine. The browser then downloads from 
 - I have **no custom domain**. The frontend runs on the default CloudFront URL, so SES sends from a
   verified **email identity** (my own address) instead of `reports@<domain>`, and there are no DKIM DNS
   records. Because of that, Gmail cannot check DKIM/DMARC for the sender, and the report may land in Spam.
+
+## e) The same week sent twice
+
+I ran `make report-now WEEK=2026-W40` twice, about 10 seconds apart, and got **two emails**: the mailer
+log has two "report emailed" lines with two different SES message ids
+(`010001a1399b55be-…` and `010001a1399b9ef6-…`, see `lab5-evidence.md`).
+
+Why: writing `reports/2026-W40.csv` is idempotent. The same week always gives the same key and the same
+content, so the second run just overwrites the one object, and there is still only one file. But every
+`PutObject` is a new upload, and S3 sends a new `ObjectCreated` event for each one, with a new
+`sequencer`. The mailer reacts to every event, and sending an email is not idempotent: each send is a new
+email. So the builder step is safe to repeat, the mailer step is not. The fix is in (a).
