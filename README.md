@@ -307,6 +307,40 @@ to the distribution's `*.cloudfront.net` name.
 
 The API keeps its function URL: a function URL cannot take a custom domain.
 
+### 4. Weekly report (Lab 5)
+
+Every Monday at 07:00 Kyiv time a CSV of last week's meetings is built, saved to S3 and emailed.
+Everything is in `infra/reports.yml` (stack `<PROJECT_NAME>-reports`):
+
+- **EventBridge Scheduler** (`cron(0 7 ? * MON *)`, Europe/Kyiv) and `make report-now` put
+  `{"week": ..., "source": ...}` on the SQS queue `report-requests` (3 attempts, then `report-requests-dlq`).
+- The **report builder** Lambda (the backend image, handler `app.reports.lambda_handler.handler`, in the
+  VPC next to the database) reads the meetings and writes `reports/<week>.csv`. With no NAT, it reaches
+  S3 through a free gateway endpoint.
+- That upload's `ObjectCreated` event starts the **report mailer** Lambda (inline in the template,
+  outside the VPC), which sends the CSV as an attachment through **SES**. The builder does not know it
+  exists.
+- Reports expire after 90 days. In the SES sandbox the sender (`REPORT_SENDER`) and recipient
+  (`REPORT_RECIPIENT`, both in `.env`) must be verified addresses: SES mails each a link on first deploy.
+
+```bash
+make seed-weeks                    # local: demo meetings over the last two ISO weeks
+make report-local WEEK=2026-W41    # local: print one week's CSV from the compose database
+make aws-deploy-reports            # push the image, deploy the stack (looks up VPC, DB, image itself)
+make report-now WEEK=2026-W40      # build (and email) one week's report on demand, through SQS
+make dlq-status                    # messages waiting / in flight in the queue and the DLQ
+```
+
+`make aws-deploy-reports SCHEDULE="rate(5 minutes)"` fires the schedule every 5 minutes for testing;
+deploy again without it to go back to Mondays.
+
+**Testing the dead-letter queue:** `make aws-deploy-reports FAIL_WEEK=2026-W01` makes the builder raise
+for that week. `make report-now WEEK=2026-W01`, then watch `make dlq-status`: each failed attempt comes
+back after the 6-minute visibility timeout, and after the third (~12 minutes) the message is in the DLQ.
+Deploy again without `FAIL_WEEK`, then move the message back with **Start DLQ redrive** in the SQS
+console (or `aws sqs start-message-move-task --source-arn <dlq arn>`); this time the report is built
+and mailed.
+
 ### Cost
 
 - **Lambda** — 1M requests and 400,000 GB-seconds a month, always free. The
