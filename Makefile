@@ -40,6 +40,7 @@ APP_STACK ?= $(PROJECT_NAME)-backend
 ECR_STACK ?= $(PROJECT_NAME)-ecr
 FRONTEND_STACK ?= $(PROJECT_NAME)-frontend
 REPORTS_STACK ?= $(PROJECT_NAME)-reports
+AI_STACK ?= $(PROJECT_NAME)-ai
 # When the weekly report is built (Europe/Kyiv). Try it out with
 # make aws-deploy-reports SCHEDULE="rate(5 minutes)", then deploy again without it.
 SCHEDULE ?= cron(0 7 ? * MON *)
@@ -47,6 +48,23 @@ SCHEDULE ?= cron(0 7 ? * MON *)
 # the builder raise for that week. Any deploy without it clears it again.
 FAIL_WEEK ?=
 IMAGE_TAG ?= latest
+# The agenda parser's model (Lab 6): anthropic (Messages API on Bedrock), converse
+# (Bedrock Converse API) or fake (no model). Try another one without editing .env:
+# make llm-hello PARSER_PROVIDER=converse PARSER_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0
+PARSER_PROVIDER ?= anthropic
+PARSER_MODEL ?= anthropic.claude-opus-5-5
+# The parser runs in the backend container with the AWS credentials from .env;
+# an empty AWS_SESSION_TOKEN is left out rather than passed as "".
+PARSER_ENV = -e PARSER_PROVIDER="$(PARSER_PROVIDER)" -e PARSER_MODEL="$(PARSER_MODEL)" \
+	-e PARSER_REGION="$(AWS_REGION)" \
+	-e AWS_ACCESS_KEY_ID="$$AWS_ACCESS_KEY_ID" -e AWS_SECRET_ACCESS_KEY="$$AWS_SECRET_ACCESS_KEY" \
+	$${AWS_SESSION_TOKEN:+-e AWS_SESSION_TOKEN="$$AWS_SESSION_TOKEN"} \
+	$${ANTHROPIC_API_KEY:+-e ANTHROPIC_API_KEY}
+# PARSER_PROVIDER=anthropic_api (the Claude API directly): locally the key comes
+# from ANTHROPIC_API_KEY in .env, passed to the container by name only, so it is
+# never on a command line. The deployed parser reads it from this SSM SecureString.
+export ANTHROPIC_API_KEY
+ANTHROPIC_API_KEY_PARAMETER ?= /$(PROJECT_NAME)/anthropic-api-key
 # x86_64 or arm64. arm64 is ~20% cheaper on Lambda and builds natively on
 # Apple Silicon; the image platform is derived from it so the two cannot drift.
 AWS_LAMBDA_ARCH ?= x86_64
@@ -104,8 +122,10 @@ define require-db-password
 endef
 
 .PHONY: help up up-build down down-v logs ps migrate revision seed seed-weeks report-local test lint fmt shell-backend psql \
+        llm-hello parse agendas-local aws-agendas \
         aws-whoami aws-deploy aws-deploy-auth aws-auth-env aws-ecr aws-push aws-deploy-backend aws-migrate aws-url aws-status aws-logs \
         aws-frontend-cert aws-deploy-frontend aws-frontend-url aws-deploy-reports report-now dlq-status \
+        aws-deploy-ai aws-ai-url aws-logs-ai \
         aws-destroy
 
 help:
@@ -145,6 +165,19 @@ seed-weeks: ## Insert ~15 demo meetings over the last two ISO weeks, for the wee
 report-local: ## Print one week's report from the local database: make report-local WEEK=2026-W41
 	@test -n "$(WEEK)" || { echo "Usage: make report-local WEEK=2026-W41 (an ISO week)"; exit 1; }
 	@$(COMPOSE) exec -T backend python -m app.reports "$(WEEK)"
+
+llm-hello: ## Ask the parser model one question; prints the answer, stop_reason and usage
+	$(require-aws-credentials)
+	@$(COMPOSE) exec -T $(PARSER_ENV) backend python -m app.ai.hello
+
+# The text goes in on stdin, so quotes and Cyrillic survive. FILE= reads a file
+# instead (UTF-8), which is easier for multi-line emails.
+parse: ## Parse pasted text into an agenda: make parse TEXT="..." (or FILE=agenda.txt)
+	@if [ -n "$(FILE)" ]; then cat "$(FILE)"; else printf '%s' '$(subst ','\'',$(TEXT))'; fi \
+		| $(COMPOSE) exec -T $(PARSER_ENV) backend python -m app.ai.agenda
+
+agendas-local: ## Show the latest saved agendas next to their AI suggestion, from the local database
+	@$(COMPOSE) exec -T backend python -m app.ai.suggestions $(or $(LIMIT),5)
 
 test: ## Run the backend test suite against a throwaway database
 	$(COMPOSE) exec db psql -U app -d postgres -tc \
@@ -294,6 +327,21 @@ aws-migrate: ## Apply database migrations (invokes the backend function directly
 			--query FunctionError --output text /dev/null | tr -d '[:space:]'); \
 		test "$$err" = "None" || { echo "Migration failed ($$err) — see make aws-logs"; exit 1; }
 
+# RDS has no public access, so the API function reads them (read-only). Lambda
+# returns the JSON with \u escapes; Python, when there is one, makes it readable.
+aws-agendas: ## Show the latest saved agendas next to their AI suggestion, from RDS: make aws-agendas LIMIT=5
+	$(require-aws-credentials)
+	@fn=$$($(call stack-output,$(APP_STACK),FunctionName) | tr -d '[:space:]'); \
+		out=.aws-agendas.json; \
+		err=$$($(AWS) lambda invoke --function-name "$$fn" \
+			--cli-binary-format raw-in-base64-out \
+			--payload '{"action":"show-agendas","limit":$(or $(LIMIT),5)}' \
+			--query FunctionError --output text "$$out" | tr -d '[:space:]'); \
+		if [ "$$err" != "None" ]; then cat "$$out"; rm -f "$$out"; echo; \
+			echo "Failed ($$err) — see make aws-logs"; exit 1; fi; \
+		PYTHONIOENCODING=utf-8 python -m json.tool --no-ensure-ascii "$$out" 2>/dev/null || cat "$$out"; \
+		rm -f "$$out"
+
 aws-url: ## Print the deployed API URL
 	@$(call stack-output,$(APP_STACK),ApiUrl)
 
@@ -349,6 +397,8 @@ aws-deploy-frontend: ## Deploy the frontend to S3 + CloudFront, built against th
 		auth_out() { printf '%s\n' "$$auth" | awk -F '\t' -v k="$$1" '$$1 == k { print $$2 }'; }; \
 		bucket=$$($(call stack-output,$(FRONTEND_STACK),BucketName) | tr -d '[:space:]'); \
 		dist=$$($(call stack-output,$(FRONTEND_STACK),DistributionId) | tr -d '[:space:]'); \
+		parser=$$($(call stack-output,$(AI_STACK),ParserUrl) 2>/dev/null | tr -d '[:space:]'); \
+		case "$$parser" in ""|None) parser=""; echo "No agenda parser — building without Paste an agenda" ;; esac; \
 		echo "Building the static export against $$api"; \
 		rm -rf frontend/out; \
 		docker build --target export --output type=local,dest=frontend/out \
@@ -357,6 +407,7 @@ aws-deploy-frontend: ## Deploy the frontend to S3 + CloudFront, built against th
 			--build-arg NEXT_PUBLIC_COGNITO_CLIENT_ID="$$(auth_out UserPoolClientId)" \
 			--build-arg NEXT_PUBLIC_COGNITO_DOMAIN="$$(auth_out HostedDomain)" \
 			--build-arg NEXT_PUBLIC_COGNITO_GOOGLE_ENABLED="$$(auth_out GoogleEnabled)" \
+			--build-arg NEXT_PUBLIC_PARSER_URL="$$parser" \
 			./frontend || exit 1; \
 		echo "Uploading to s3://$$bucket"; \
 		$(AWS) s3 sync frontend/out "s3://$$bucket" --delete --exclude "*.html" \
@@ -452,11 +503,56 @@ dlq-status: ## Show how many messages wait in the report queue and its dead-lett
 			printf '%-55s waiting=%s in-flight=%s\n' "$${url##*/}" "$$1" "$$2"; \
 		done
 
+aws-deploy-ai: aws-push ## Deploy the agenda parser (Lambda + public function URL); PARSER_PROVIDER / PARSER_MODEL pick the model
+	$(require-aws-credentials)
+	@pool=$$($(call stack-output,$(AUTH_STACK),UserPoolId) 2>/dev/null | tr -d '[:space:]'); \
+		client=$$($(call stack-output,$(AUTH_STACK),UserPoolClientId) | tr -d '[:space:]'); \
+		case "$$pool" in ""|None) echo "No user pool found — run: make aws-deploy-auth"; exit 1 ;; esac; \
+		origins="$(AWS_CORS_ORIGINS)"; \
+		if [ -z "$$origins" ]; then \
+			origins=$$($(call stack-output,$(FRONTEND_STACK),AllowedOrigins) 2>/dev/null | tr -d '[:space:]'); \
+			case "$$origins" in ""|None) origins='*' ;; esac; \
+		fi; \
+		origins="$$origins,http://localhost:3000"; \
+		repo=$$($(call stack-output,$(ECR_STACK),RepositoryUri) | tr -d '[:space:]'); \
+		digest=$$($(AWS) ecr describe-images --repository-name "$${repo#*/}" \
+			--image-ids imageTag=$(IMAGE_TAG) --query 'imageDetails[0].imageDigest' \
+			--output text | tr -d '[:space:]'); \
+		echo "provider=$(PARSER_PROVIDER) model=$(PARSER_MODEL) origins=$$origins"; \
+		echo "image=$$repo@$$digest"; \
+		$(call wait-stack-idle,$(AI_STACK)); \
+		$(call clear-failed-create,$(AI_STACK)); \
+		$(AWS) cloudformation deploy \
+			--stack-name $(AI_STACK) \
+			--template-file infra/ai.yml \
+			--capabilities CAPABILITY_IAM \
+			--no-fail-on-empty-changeset \
+			$(STACK_TAGS) \
+			--parameter-overrides \
+				"ProjectName=$(PROJECT_NAME)" \
+				ImageUri="$$repo@$$digest" \
+				"Architecture=$(AWS_LAMBDA_ARCH)" \
+				"ParserProvider=$(PARSER_PROVIDER)" \
+				"ParserModel=$(PARSER_MODEL)" \
+				"AnthropicApiKeyParameter=$(ANTHROPIC_API_KEY_PARAMETER)" \
+				"CognitoUserPoolId=$$pool" \
+				"CognitoClientId=$$client" \
+				"AllowedOrigins=$$origins"
+	@$(MAKE) --no-print-directory aws-ai-url
+
+aws-ai-url: ## Print the agenda parser's URL
+	@$(call stack-output,$(AI_STACK),ParserUrl)
+
+aws-logs-ai: ## Follow the agenda parser's logs (one JSON line per parse)
+	$(AWS) logs tail /aws/lambda/$(PROJECT_NAME)-agenda-parser --follow
+
 aws-destroy: ## Delete every stack, including the database and its data
 	$(require-aws-credentials)
-	@printf 'Delete %s, %s, %s, %s and %s? The database and all its data, every user account and every saved report go with them (no snapshot). Type yes: ' \
-		"$(FRONTEND_STACK)" "$(REPORTS_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
+	@printf 'Delete %s, %s, %s, %s, %s and %s? The database and all its data, every user account and every saved report go with them (no snapshot). Type yes: ' \
+		"$(AI_STACK)" "$(FRONTEND_STACK)" "$(REPORTS_STACK)" "$(APP_STACK)" "$(AUTH_STACK)" "$(ECR_STACK)"; \
 		read answer; test "$$answer" = "yes" || { echo "Aborted."; exit 1; }
+	-$(AWS) cloudformation delete-stack --stack-name $(AI_STACK)
+	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(AI_STACK)
 	@bucket=$$($(call stack-output,$(FRONTEND_STACK),BucketName) 2>/dev/null | tr -d '[:space:]'); \
 		if [ -n "$$bucket" ] && [ "$$bucket" != "None" ]; then \
 			echo "Emptying s3://$$bucket"; \

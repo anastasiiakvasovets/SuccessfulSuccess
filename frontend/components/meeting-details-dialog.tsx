@@ -1,7 +1,17 @@
 "use client"
 
 import { useRef } from "react"
-import { CalendarDays, Clock, Mail, MapPin, Pencil, Trash2, Users } from "lucide-react"
+import {
+  CalendarDays,
+  CheckSquare,
+  Clock,
+  ListChecks,
+  Mail,
+  MapPin,
+  Pencil,
+  Trash2,
+  Users,
+} from "lucide-react"
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
@@ -28,12 +38,14 @@ export function MeetingDetailsDialog({
   onOpenChange,
   onEdit,
   onDelete,
+  onAgenda,
 }: {
   meeting?: Meeting
   open: boolean
   onOpenChange: (open: boolean) => void
   onEdit: (meeting: Meeting) => void
   onDelete: (meeting: Meeting) => void
+  onAgenda: (meeting: Meeting) => void
 }) {
   const editRef = useRef<HTMLButtonElement>(null)
 
@@ -116,6 +128,65 @@ export function MeetingDetailsDialog({
                   </li>
                 ))}
               </ul>
+            )}
+          </section>
+
+          <Separator />
+
+          <section className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="flex items-center gap-2 text-sm font-semibold">
+                <ListChecks className="size-4" aria-hidden />
+                Agenda
+              </h3>
+              <Button variant="outline" size="sm" onClick={() => onAgenda(meeting)}>
+                {meeting.agenda ? "Edit agenda" : "Add agenda"}
+              </Button>
+            </div>
+            {!meeting.agenda ||
+            (meeting.agenda.items.length === 0 && meeting.agenda.action_items.length === 0) ? (
+              <p className="text-muted-foreground text-sm">No agenda yet.</p>
+            ) : (
+              <>
+                <ol className="list-decimal space-y-1 pl-5 text-sm">
+                  {meeting.agenda.items.map((item, index) => (
+                    <li key={index}>
+                      {item.topic}
+                      {item.owner || item.minutes ? (
+                        <span className="text-muted-foreground">
+                          {" — "}
+                          {[item.owner, item.minutes ? `${item.minutes} min` : null]
+                            .filter(Boolean)
+                            .join(", ")}
+                        </span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ol>
+                {meeting.agenda.action_items.length > 0 ? (
+                  <ul className="space-y-1 text-sm">
+                    {meeting.agenda.action_items.map((action, index) => (
+                      <li key={index} className="flex items-start gap-2">
+                        <CheckSquare
+                          className="text-muted-foreground mt-0.5 size-4 shrink-0"
+                          aria-hidden
+                        />
+                        <span>
+                          {action.task}
+                          {action.owner || action.due ? (
+                            <span className="text-muted-foreground">
+                              {" — "}
+                              {[action.owner, action.due ? `by ${action.due}` : null]
+                                .filter(Boolean)
+                                .join(", ")}
+                            </span>
+                          ) : null}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </>
             )}
           </section>
 

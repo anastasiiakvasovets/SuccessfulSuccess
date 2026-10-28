@@ -1,5 +1,7 @@
-"""AWS Lambda entry point: the API behind the function URL, plus on-demand migrations."""
+"""AWS Lambda entry point: the API behind the function URL, plus on-demand migrations
+and a read-only look at the saved agendas."""
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -7,6 +9,7 @@ from alembic.config import Config
 from mangum import Mangum
 
 from alembic import command
+from app.ai.suggestions import latest_agendas
 from app.main import app
 
 ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
@@ -31,4 +34,10 @@ def handler(event, context):
         with ThreadPoolExecutor(max_workers=1) as pool:
             pool.submit(migrate).result()
         return {"status": "migrated"}
+    # `make aws-agendas`: saved agendas next to the AI suggestion, read-only.
+    if event.get("action") == "show-agendas":
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(
+                lambda: asyncio.run(latest_agendas(int(event.get("limit", 5))))
+            ).result()
     return api(event, context)

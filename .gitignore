@@ -15,3 +15,9 @@ next-env.d.ts
 .env*.local
 .idea/
 .DS_Store
+
+# local AWS CLI inputs that hold personal data (e.g. the budget alert email)
+budget.json
+budget-notify.json
+# `make aws-agendas` output (saved agendas), deleted after printing
+.aws-agendas.json

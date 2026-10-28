@@ -1,7 +1,10 @@
 import { signOut } from "aws-amplify/auth"
 
 import { getAccessToken } from "@/lib/auth"
+import { toIsoDate } from "@/lib/datetime"
 import type {
+  AgendaParseResult,
+  AgendaSaveInput,
   ApiErrorBody,
   ApiErrorDetail,
   Meeting,
@@ -12,6 +15,12 @@ import type {
 
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
+
+/** The agenda parser's function URL (Lab 6). Empty hides "Paste an agenda". */
+export const PARSER_URL = process.env.NEXT_PUBLIC_PARSER_URL ?? ""
+
+/** Longest text the parser accepts; it answers 413 above this. */
+export const PARSER_MAX_CHARS = 10_000
 
 export class ApiError extends Error {
   readonly code: string
@@ -27,11 +36,11 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, baseUrl = API_BASE_URL): Promise<T> {
   const token = await getAccessToken()
   let response: Response
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
+    response = await fetch(`${baseUrl}${path}`, {
       ...init,
       headers: {
         "Content-Type": "application/json",
@@ -40,7 +49,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       },
       cache: "no-store",
     })
-  } catch {
+  } catch (error) {
+    // Cancelled by the caller (AbortController): not a network failure.
+    if (init?.signal?.aborted) throw error
     throw new ApiError(0, "network_error", "Could not reach the meetings API.", [])
   }
 
@@ -94,6 +105,34 @@ export function updateMeeting(id: string, payload: MeetingCreateInput) {
     method: "PUT",
     body: JSON.stringify(payload),
   })
+}
+
+/** Saves through the API with its usual validation; the parser never writes. */
+export function saveAgenda(id: string, payload: AgendaSaveInput) {
+  return request<Meeting>(`/api/v1/meetings/${id}/agenda`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  })
+}
+
+/**
+ * Asks the parser for a suggested agenda. Sends the user's date and time zone,
+ * because "Monday" means the user's Monday, not the server's.
+ */
+export function parseAgenda(text: string, signal?: AbortSignal) {
+  return request<AgendaParseResult>(
+    "",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        text,
+        today: toIsoDate(new Date()),
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      }),
+      signal,
+    },
+    PARSER_URL,
+  )
 }
 
 export function deleteMeeting(id: string) {

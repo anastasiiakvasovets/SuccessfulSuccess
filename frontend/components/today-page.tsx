@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 
+import { AgendaDialog } from "@/components/agenda-dialog"
 import { AppHeader } from "@/components/app-header"
 import { DeleteMeetingDialog } from "@/components/delete-meeting-dialog"
 import { MeetingDetailsDialog } from "@/components/meeting-details-dialog"
@@ -17,6 +18,7 @@ type DialogState =
   | { kind: "form"; meeting?: Meeting }
   | { kind: "details"; meeting: Meeting }
   | { kind: "delete"; meeting: Meeting }
+  | { kind: "agenda"; meeting: Meeting }
 
 export function TodayPage({ initialDialogOpen = false }: { initialDialogOpen?: boolean }) {
   const [dialog, setDialog] = useState<DialogState>(
@@ -42,6 +44,7 @@ export function TodayPage({ initialDialogOpen = false }: { initialDialogOpen?: b
   const onView = (meeting: Meeting) => open({ kind: "details", meeting })
   const onEdit = (meeting: Meeting) => open({ kind: "form", meeting })
   const onDelete = (meeting: Meeting) => open({ kind: "delete", meeting })
+  const onAgenda = (meeting: Meeting) => open({ kind: "agenda", meeting })
 
   return (
     <>
@@ -78,6 +81,13 @@ export function TodayPage({ initialDialogOpen = false }: { initialDialogOpen?: b
         meeting={current}
         onEdit={onEdit}
         onDelete={onDelete}
+        onAgenda={onAgenda}
+      />
+      {/* The copy taken when it opened: a background refetch must not reset the form. */}
+      <AgendaDialog
+        open={dialog.kind === "agenda"}
+        onOpenChange={(isOpen) => !isOpen && close()}
+        meeting={selected}
       />
       <DeleteMeetingDialog
         open={dialog.kind === "delete"}

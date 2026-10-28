@@ -1,0 +1,196 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Paste an agenda (Lab 6): the agenda parser behind its own public function URL.
+  It runs the backend image with another handler, outside the VPC: it needs no
+  database, and reaches Bedrock (or the Claude API) and Cognito's signing keys
+  over the internet, with no NAT and no VPC endpoint. It only suggests an agenda; the browser saves
+  it through the API. Costs nothing while nobody parses.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: successfulsuccess
+    Description: Prefix for the names of the resources in this stack.
+
+  ImageUri:
+    Type: String
+    Description: >-
+      Backend image, pinned by digest: <account>.dkr.ecr.<region>.amazonaws.com/<repo>@sha256:...
+      The parser runs the same image with a different handler.
+
+  Architecture:
+    Type: String
+    Default: x86_64
+    AllowedValues: [x86_64, arm64]
+    Description: Must match the platform the image was built for.
+
+  ParserProvider:
+    Type: String
+    Default: anthropic
+    AllowedValues: [anthropic, converse, anthropic_api, fake]
+    Description: >-
+      anthropic: the Anthropic Messages API on Bedrock (bedrock-mantle).
+      converse: the Bedrock Converse API. anthropic_api: the Claude API
+      directly, with the key from AnthropicApiKeyParameter. fake: no model,
+      for building the feature before Bedrock access works.
+
+  ParserModel:
+    Type: String
+    Default: anthropic.claude-opus-5-5
+    Description: >-
+      The model id for that provider, e.g. anthropic.claude-opus-5-5,
+      us.anthropic.claude-haiku-4-5-20251001-v1:0, or claude-opus-5-5 for
+      anthropic_api.
+
+  AnthropicApiKeyParameter:
+    Type: String
+    Default: /successfulsuccess/anthropic-api-key
+    AllowedPattern: "^/[A-Za-z0-9_./-]+$"
+    Description: >-
+      SSM SecureString (encrypted with the AWS-managed aws/ssm key) holding the
+      Claude API key for anthropic_api. Created by hand, never in a template.
+      The parser may read this one parameter and no other.
+
+  CognitoUserPoolId:
+    Type: String
+    Description: The user pool whose access tokens the parser accepts (the auth stack's).
+
+  CognitoClientId:
+    Type: String
+    Description: The app client those tokens must be issued to.
+
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Description: Origins the browser may call the parser from (the site, and localhost for development).
+
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+
+Resources:
+  # Logs, and the two Bedrock APIs: bedrock-mantle for the Messages API,
+  # bedrock:InvokeModel for Converse. "*" for now; narrowing it to the chosen
+  # model (and its inference profile) is a discussion question in the lab.
+  # The Claude API key: GetParameter on exactly one parameter. The aws/ssm key's
+  # own policy lets SSM decrypt it for this account, so no kms:Decrypt is needed.
+  ParserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: call-bedrock
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock-mantle:CreateInference
+                  - bedrock:InvokeModel
+                Resource: "*"
+        - PolicyName: read-claude-api-key
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                # The name starts with "/", so it follows "parameter" directly.
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AnthropicApiKeyParameter}"
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  ParserLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-agenda-parser"
+      RetentionInDays: 7
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  ParserFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-agenda-parser"
+      Description: Parses pasted text into a suggested agenda with Claude on Bedrock
+      PackageType: Image
+      Code:
+        ImageUri: !Ref ImageUri
+      ImageConfig:
+        Command: ["app.ai.agenda_lambda.handler"]
+      Architectures:
+        - !Ref Architecture
+      Role: !GetAtt ParserRole.Arn
+      # A parse takes 2-8 s; one retry after an invalid answer doubles that.
+      MemorySize: 512
+      Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref ParserLogGroup
+      # No VpcConfig: the parser needs no database.
+      Environment:
+        Variables:
+          PARSER_PROVIDER: !Ref ParserProvider
+          PARSER_MODEL: !Ref ParserModel
+          PARSER_REGION: !Ref AWS::Region
+          # The parameter's name, never the key: the handler reads the value at start.
+          ANTHROPIC_API_KEY_PARAMETER: !Ref AnthropicApiKeyParameter
+          COGNITO_REGION: !Ref AWS::Region
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          LOG_LEVEL: !Ref LogLevel
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  # --- function URL ---------------------------------------------------------
+
+  # Public, like the API's: the handler checks the Cognito access token itself,
+  # because the function URL cannot. Unlike the API, CORS is configured here
+  # (the handler sets no CORS headers), and the URL answers the preflight
+  # without invoking the function. The URL and the permissions take no tags.
+  ParserUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt ParserFunction.Arn
+      AuthType: NONE
+      InvokeMode: BUFFERED
+      Cors:
+        AllowOrigins: !Ref AllowedOrigins
+        AllowMethods: [POST]
+        AllowHeaders: [authorization, content-type]
+        MaxAge: 300
+
+  # A public URL needs both statements, as in infra/backend.yml: InvokeFunctionUrl
+  # for the URL itself, and InvokeFunction limited to calls that arrive through it.
+  ParserUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ParserFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  ParserUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ParserFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  ParserUrl:
+    Description: Where the browser POSTs pasted text (the function URL, without its trailing slash)
+    Value: !Sub ["https://${Host}", {Host: !Select [2, !Split ["/", !GetAtt ParserUrl.FunctionUrl]]}]
+  FunctionName:
+    Value: !Ref ParserFunction
+  LogGroup:
+    Value: !Ref ParserLogGroup

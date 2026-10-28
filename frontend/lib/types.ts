@@ -15,8 +15,49 @@ export type Meeting = {
   starts_at: string
   ends_at: string
   participants: Participant[]
+  agenda: Agenda | null
   created_at: string
   updated_at: string
+}
+
+export type AgendaItem = {
+  topic: string
+  owner: string | null
+  minutes: number | null
+}
+
+export type ActionItem = {
+  task: string
+  owner: string | null
+  /** YYYY-MM-DD */
+  due: string | null
+}
+
+export type Agenda = {
+  items: AgendaItem[]
+  action_items: ActionItem[]
+}
+
+/** What the agenda parser returns: a suggestion the user checks before saving. */
+export type ParsedAgenda = Agenda & {
+  title: string | null
+  /** ISO 8601 with the user's offset, when the text says when */
+  starts_at: string | null
+  duration_minutes: number | null
+  language: string
+}
+
+export type AgendaParseResult = {
+  agenda: ParsedAgenda
+  model: string
+  prompt_version: string
+}
+
+/** Saving an agenda; the ai_* fields are set when it started from a suggestion. */
+export type AgendaSaveInput = Agenda & {
+  ai_suggestion?: ParsedAgenda | null
+  ai_model?: string | null
+  ai_prompt_version?: string | null
 }
 
 export type MeetingList = {

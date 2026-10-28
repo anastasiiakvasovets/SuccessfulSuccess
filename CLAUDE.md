@@ -37,9 +37,14 @@ The assignment is in [docs/lab5.md](docs/lab5.md). Read it before working on the
   Override on the command line instead (`make report-now WEEK=2026-W39`).
 - The Makefile runs the AWS CLI in a container (`amazon/aws-cli:latest`) with the credentials from
   `.env`. `AWS=aws make <target>` uses the host CLI (v2) instead.
-- Avast antivirus is installed. Its HTTPS scanning is excluded for `amazonaws.com`, so the host
-  `aws` CLI and `make aws-whoami` both work without `AWS_CA_BUNDLE` (checked 2026-10-13). If
-  `CERTIFICATE_VERIFY_FAILED` comes back, that exclusion has been lost.
+- Avast antivirus is installed. Its HTTPS scanning is excluded for `*.amazonaws.com` and
+  `*.api.aws` (Bedrock's Messages API endpoint, `bedrock-mantle.us-east-1.api.aws`), so the host
+  `aws` CLI and `make aws-whoami` both work without `AWS_CA_BUNDLE`. The exclusion was lost once
+  and restored on 2026-10-27: if `CERTIFICATE_VERIFY_FAILED` comes back, it has been lost again.
+  The containerised CLI and the compose backend are unaffected either way.
+- Docker Desktop must be running for every `make aws-*` target (the CLI runs in a container).
+- In Claude Code's Bash tool, a heredoc mangles `\` + newline (Makefile and Dockerfile line
+  continuations come out as a literal `\n`). Edit such files with the Edit/Write tools instead.
 
 ### How templates are deployed and tagged
 
@@ -69,6 +74,9 @@ defaulting to `successfulsuccess`.
 | `make aws-deploy-auth` | `successfulsuccess-auth` / `infra/auth.yml` |
 | `make aws-deploy-frontend` | `successfulsuccess-frontend` / `infra/frontend.yml` |
 | `make aws-logs` / `aws-status` / `aws-migrate` | backend function helpers |
+| `make aws-deploy-reports` | `successfulsuccess-reports` / `infra/reports.yml` (Lab 5; runs `aws-push` first) |
+| `make aws-deploy-ai` | `successfulsuccess-ai` / `infra/ai.yml` (Lab 6; runs `aws-push` first) |
+| `make aws-ai-url` / `aws-logs-ai` / `aws-agendas` | agenda parser helpers (Lab 6) |
 
 ### Backend Lambda: network (looked up with the AWS CLI on 2026-10-13)
 
@@ -97,19 +105,22 @@ defaulting to `successfulsuccess`.
 
 - Built from `backend/Dockerfile.lambda` (base `public.ecr.aws/lambda/python:3.12`, deps installed
   with `uv pip install -r pyproject.toml`, copies `alembic.ini`, `alembic/`, `app/`).
-  Default `CMD ["app.lambda_handler.handler"]`. A second handler is selected with
-  `ImageConfig: { Command: ["app.reports.lambda_handler.handler"] }`.
+  Default `CMD ["app.lambda_handler.handler"]`. Other handlers are selected with
+  `ImageConfig: { Command: [...] }`: `app.reports.lambda_handler.handler` (report builder, Lab 5)
+  and `app.ai.agenda_lambda.handler` (agenda parser, Lab 6).
 - `boto3` is only in the `dev` dependency group (tests, compose image): the Lambda Python base image
   ships it, and `Dockerfile.lambda` installs only `[project].dependencies`.
 - Repository `980553487282.dkr.ecr.us-east-1.amazonaws.com/successfulsuccess-backend`
-  (`successfulsuccess-ecr` output `RepositoryUri`). Lifecycle keeps the 5 newest images.
+  (`successfulsuccess-ecr` output `RepositoryUri`). Lifecycle keeps the 15 newest images; every
+  function is pinned to a digest, so check that the pinned ones survive before pushing a lot.
 - `make aws-push`: `ecr get-login-password | docker login`, then
   `docker build --platform linux/amd64 --provenance=false -f backend/Dockerfile.lambda
   -t <repo>:$(IMAGE_TAG) ./backend` and `docker push` (`IMAGE_TAG` defaults to `latest`).
 - The stack is deployed with the image **pinned by digest**: `make aws-deploy-backend` resolves
-  the `latest` tag to a digest and passes `ImageUri=<repo>@sha256:...`. Currently deployed:
-  `...successfulsuccess-backend@sha256:d8b853a8a671c9c280b29892d9d37ecbef0d724bb4bd0a5ff7a9966005ab1989`
-  (pushed 2026-09-30). The reports stack should resolve the digest the same way.
+  the `latest` tag to a digest and passes `ImageUri=<repo>@sha256:...`; the reports and AI stacks
+  do the same. Deployed on 2026-10-27: the API and the agenda parser on
+  `...successfulsuccess-backend@sha256:e57dac2c7a7c67c65927cb6b4e0064ddef6441a3640b7bfa0209a05f8aa331af`;
+  the report builder still on `sha256:b3b0804f...` (2026-10-14) until `make aws-deploy-reports`.
 
 ### Database connection (API Lambda)
 
@@ -127,12 +138,14 @@ defaulting to `successfulsuccess`.
 - `app/config.py` (`Settings`, pydantic-settings) reads them; `app/db.py` creates one module-level
   async engine (`create_async_engine`, asyncpg) and `SessionFactory`. Code is async throughout.
 
-### Meetings data model (`backend/app/models/`, migrations `0001`, `0002`)
+### Meetings data model (`backend/app/models/`, migrations `0001`–`0003`)
 
 - `meetings`: `id` UUID pk; `owner_id` varchar(128) → `users.id` (nullable, cascade delete);
   `name` varchar(200) (**the title**); `description` text; `location` varchar(200);
   `starts_at`, `ends_at` timestamptz (check `ends_at > starts_at`; **duration = ends_at − starts_at**,
   not stored); `created_at`, `updated_at`. Indexes on `starts_at` and `(owner_id, starts_at)`.
+  Since `0003` (Lab 6): `agenda` JSONB (`{"items": [...], "action_items": [...]}`), and
+  `ai_suggestion` JSONB, `ai_model` varchar(100), `ai_prompt_version` varchar(50) (see Lab 6 below).
 - `participants`: `id` UUID pk; `meeting_id` → `meetings.id` (cascade); `name` varchar(120);
   `email` varchar(255) nullable; `position` int. Free text, **not linked to `users`**.
   Participant count = rows per meeting.
@@ -157,3 +170,78 @@ defaulting to `successfulsuccess`.
   `make lint` (ruff + eslint), `make fmt`.
 - Run report code against the compose DB with e.g.
   `docker compose exec backend python -m app.reports.weekly 2026-W40` (once such a module exists).
+- Lab 6, in the backend container with the `.env` AWS credentials: `make llm-hello`,
+  `make parse TEXT="..."` (or `FILE=agenda.txt`), `make agendas-local`.
+
+## Lab 6 — Paste an agenda (LLM parser)
+
+The assignment is in [docs/labs/lab6.md](docs/labs/lab6.md); only Part 4 is built. The decision
+record is [docs/adr/0006-llm-agenda-parsing.md](docs/adr/0006-llm-agenda-parsing.md), the diagram
+[docs/architecture/c4-container.md](docs/architecture/c4-container.md).
+
+### Ground rules (from the owner)
+
+- New Lab 6 infra lives in **one** template, `infra/ai.yml`, stack `successfulsuccess-ai`, tagged
+  `PROJECT_NAME` like the others.
+- The model is a **setting**, never code: `PARSER_PROVIDER` (`anthropic` = Messages API on Bedrock
+  via `AnthropicBedrockMantle`; `converse` = Bedrock Converse; `anthropic_api` = the Claude API
+  via `anthropic.Anthropic()`, same request as `anthropic`; `fake` = no model) and
+  `PARSER_MODEL`. Make variables, defaults `anthropic` / `anthropic.claude-opus-5-5`; `.env` sets
+  `PARSER_PROVIDER=fake`, so pass the provider on the command line for real calls. The two candidates: Claude Opus 5.5 (`anthropic.claude-opus-5-5`,
+  the lab's target) or Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`, Converse).
+- Bedrock is **blocked account-wide** (checked 2026-10-28, Paid plan). AWS Support declined the
+  quota increase on 2026-10-28 (case 179312089700299) until there is usage history and a full
+  billing cycle, so the Claude API fallback stays for now:
+  every model tried is refused before inference, either "not available for this account"
+  (Claude Opus 5.5 / Haiku 5.5, GPT-6 / 6.1) or a daily token quota of 0 (Claude 4.x, Nova,
+  Llama, Mistral, gpt-oss). Don't try more Bedrock models; it is not a code problem.
+- **Deployed now: the Claude API as a fallback**, `PARSER_PROVIDER=anthropic_api`,
+  `PARSER_MODEL=claude-opus-5-5`. The key: `ANTHROPIC_API_KEY` in `.env` locally (passed into
+  the container by name only); in Lambda the SSM SecureString `/successfulsuccess/anthropic-api-key`
+  (`aws/ssm` key), read once at cold start by `providers.warm_up()`; the role has
+  `ssm:GetParameter` on exactly that parameter. Never print, log or echo the key, and never put
+  it in a template, an env var of the function, or a command line. Back to Bedrock later:
+  `make aws-deploy-ai PARSER_PROVIDER=anthropic PARSER_MODEL=anthropic.claude-opus-5-5`.
+- Each `make llm-hello` / `make parse` against a real model costs real money (≈ $0.012 per Opus
+  5.5 parse): ask before running loops of them.
+- IAM stays `bedrock-mantle:CreateInference` + `bedrock:InvokeModel` on `"*"` (narrowing it is a
+  discussion answer, not a change). Prices in `app/ai/pricing.py`: the lab's table, plus Haiku 4.5
+  at $1 / $5 per 1M tokens, the Claude API ids `claude-opus-5-5` / `claude-haiku-5-5`, and
+  `fake` at $0. A model id missing there logs `cost_usd: null`: add it when you add a model.
+- The AWS budget `monthly-5usd` already exists (made by hand): do not create another. Budget JSON
+  files hold the owner's email and are gitignored.
+- Still to do once a model answers: the five-input test table, one `agenda_parsed` log line, the
+  written answers, the screen recording, and the two `TODO` placeholders in ADR 0006.
+
+### How it fits together
+
+- `backend/app/ai/`: `agenda.py` (schemas `ParsedAgenda`/`AgendaItem`/`ActionItem`, `SYSTEM`,
+  `PROMPT_VERSION = "agenda-v1"`, `parse_agenda`, one retry on a validation error),
+  `providers.py` (one interface, three providers; throttling → `ModelBusyError`), `pricing.py`,
+  `agenda_lambda.py` (the handler), `hello.py` (`make llm-hello`), `suggestions.py` (read-only list).
+- `settings.parser_model_id` is `"fake"` when no model is called: use it for anything logged or
+  stored, so fake output is never attributed to a real model.
+- Handler order: Cognito access token (`app.auth.get_verifier()`, keys fetched from the internet,
+  no `COGNITO_JWKS`) → 401; text > `parser_max_chars` (10,000) → 413 before any model call; bad
+  body → 400; `AgendaParseError` → 422; `ModelBusyError` → 429; anything else → 503. Errors use
+  the API's `{"error": {code, message, details}}` envelope. One JSON log line per parse
+  (`agenda_parsed` / `agenda_parse_failed`) with user, provider, model, prompt version, chars,
+  tokens, latency and `cost_usd`.
+- Function `successfulsuccess-agenda-parser`: no VPC, 30 s, 512 MB, log group
+  `/aws/lambda/successfulsuccess-agenda-parser` (7 days). Its function URL has `AuthType: NONE` and
+  **CORS on the URL** (site origin + `http://localhost:3000`, POST) — unlike the API, whose CORS is in
+  FastAPI. The handler must not add CORS headers. URL: `make aws-ai-url`.
+- Saving: `PUT /api/v1/meetings/{id}/agenda` (`AgendaWrite`). A sent `ai_suggestion` must validate
+  as `ParsedAgenda` and name its model and prompt version; it replaces the stored one. A save
+  without one keeps the earlier suggestion. `ai_*` is never returned by the API; read it with
+  `make aws-agendas` (invokes the API function with `{"action": "show-agendas"}`, read-only
+  transaction, all users) or `make agendas-local`.
+- Frontend: `components/agenda-dialog.tsx` (paste, Parse/Cancel with AbortController, per-status
+  error messages, the agenda form with "suggested" badges), opened from the meeting details dialog.
+  `NEXT_PUBLIC_PARSER_URL` is a build arg: `make aws-deploy-frontend` reads it from the AI stack;
+  compose takes `PARSER_URL` from `.env`. Empty hides Paste an agenda.
+- Deploy order after backend changes: `make aws-deploy-backend` (push + migrate), then
+  `make aws-deploy-ai PARSER_PROVIDER=... PARSER_MODEL=...`, then `make aws-deploy-frontend` if the
+  parser URL or the UI changed. Switching models later is only `make aws-deploy-ai` with new values.
+- Tests: `tests/test_agenda_parser.py`, `tests/test_agenda_lambda.py`, `tests/test_agenda_api.py`;
+  no test calls a model (stub SDK clients, scripted providers, the fake provider).

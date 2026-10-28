@@ -1,0 +1,1 @@
+{"event": "agenda_parsed", "status": 200, "user": "349834c8-9001-7013-045c-3be1075086cb", "provider": "anthropic_api", "model": "claude-opus-5-5", "prompt_version": "agenda-v1", "chars": 183, "input_tokens": 1282, "output_tokens": 345, "latency_ms": 3801, "cost_usd": 0.012028}
