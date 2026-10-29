@@ -36,7 +36,7 @@ type Step =
 
 const email = z.email("Enter a valid email address")
 
-// Mirrors the user pool's password policy in infra/auth.yml.
+// Mirrors the user pool's password policy in infra/auth.tf.
 const newPassword = z
   .string()
   .min(8, "Use at least 8 characters")
@@ -569,8 +569,8 @@ export function AuthPage() {
 
               {!isAuthConfigured ? (
                 <div className="tint-amber mt-6 rounded-2xl px-4 py-3 text-sm">
-                  Sign-in isn&apos;t configured. Run <code>make aws-deploy-auth</code> and put the
-                  values from <code>make aws-auth-env</code> in <code>.env</code>.
+                  Sign-in isn&apos;t configured. Put the values from <code>make aws-auth-env</code>{" "}
+                  in <code>.env</code> and restart.
                 </div>
               ) : null}
 

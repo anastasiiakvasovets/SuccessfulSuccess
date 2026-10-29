@@ -1,8 +1,35 @@
 # CLAUDE.md
 
-Meetings app: FastAPI backend (`backend/`), Next.js frontend (`frontend/`), CloudFormation
-templates (`infra/`), one `Makefile` that drives both local development and AWS deploys.
+Meetings app: FastAPI backend (`backend/`), Next.js frontend (`frontend/`), infrastructure in
+`infra/` (Terraform for auth, reports, ai since Lab 7; CloudFormation for ecr, backend,
+frontend), one `Makefile` that drives both local development and AWS deploys.
 `README.md` and `SPEC.md` describe the app; this file holds working notes for the labs.
+
+## Lab 7 — auth, reports and ai moved to Terraform
+
+- `infra/auth.tf`, `reports.tf`, `ai.tf` (+ `versions.tf`, `variables.tf`, `outputs.tf`,
+  `terraform.tfvars`, `lambda/report_mailer/`) replace `auth.yml`, `reports.yml`, `ai.yml`, which are
+  deleted. The resources were imported from the old stacks (deleted with `Retain`); the record is
+  `docs/migration/` (`inventory.md`, `plan-no-changes.txt`, `<stack>-resources.txt`).
+- State: HCP Terraform, organization `ooad-nastyakvasovets`, workspace `successfulsuccess-dev`.
+  **Never run `terraform apply`**, and no make target does: apply happens only in HCP Terraform after
+  a push to `main`. Locally: `make infra-init` / `infra-fmt` / `infra-validate` / `infra-plan`.
+- Secrets (`google_client_secret`, `db_password`) and the emails (`sender_email`,
+  `report_recipient`) are never in a committed file: HCP workspace variables (Sensitive for the
+  secrets), or `infra/secrets.auto.tfvars` (gitignored, and excluded by `infra/.terraformignore`)
+  for local execution. Non-secret values are in `infra/terraform.tfvars`.
+- The Makefile reads outputs with `$(call tf-output,<name>)` = `terraform -chdir=infra output -raw
+  <name>` (names in `infra/outputs.tf`: `user_pool_id`, `issuer`, `queue_url`, `dlq_url`,
+  `parser_url`, ...). Settings such as the schedule, `fail_week` or the parser model are Terraform
+  variables now, changed through `terraform.tfvars` and a push.
+- Terraform ignores `image_uri` of the report builder and the agenda parser: `make
+  aws-update-workers` (also run by `make aws-deploy-backend`, after `aws-migrate`) pins both on the
+  pushed image by digest. The mailer's zip is ignored too; a change to it goes out by hand.
+- The three CloudFormation stacks stay and are read by Terraform with `data
+  "aws_cloudformation_stack"`. A new CloudFront domain needs a Terraform run (Cognito callbacks and
+  parser CORS come from it).
+- Below, Lab 5 and Lab 6 notes describe the CloudFormation era where they mention `reports.yml`,
+  `ai.yml` or their deploy targets.
 
 ## Lab 5 — weekly report built by events
 
@@ -20,9 +47,10 @@ The assignment is in [docs/lab5.md](docs/lab5.md). Read it before working on the
   `reports@<domain>`; there is no DKIM/DNS step.
 - The owner works in Windows PowerShell. Every command and Makefile target must work there.
 - Work directly on `main` (it's a fork). No branches. Commit only when asked.
-- All new Lab 5 infra goes into **one** template, `infra/reports.yml`, deployed as stack
-  `successfulsuccess-reports` and tagged `PROJECT_NAME=successfulsuccess` like the others.
-- No secrets or email addresses hardcoded in code or templates: pass them as parameters from `.env`.
+- All Lab 5 infra is in `infra/reports.tf` (was the template `infra/reports.yml`, stack
+  `successfulsuccess-reports`), tagged `PROJECT_NAME=successfulsuccess` like the others.
+- No secrets or email addresses hardcoded in code, templates or `.tf`/`.tfvars` files: pass them
+  as parameters / Terraform variables (see Lab 7).
 - The database is **RDS PostgreSQL `db.t3.micro`, not Aurora** (changed in commit `c0307bd`). Where
   the lab text says "Aurora", read "the RDS instance". It does not pause, so it has no resume delay
   and bills per hour whether or not anything queries it.
@@ -48,7 +76,8 @@ The assignment is in [docs/lab5.md](docs/lab5.md). Read it before working on the
 
 ### How templates are deployed and tagged
 
-Every stack is deployed with `aws cloudformation deploy`, from a make target, the same way:
+The three remaining stacks (ecr, backend, frontend) are deployed with `aws cloudformation
+deploy`, from a make target, the same way:
 
 ```
 $(call wait-stack-idle,<stack>)       # wait out *_IN_PROGRESS
@@ -70,13 +99,13 @@ defaulting to `successfulsuccess`.
 | --- | --- |
 | `make aws-ecr` | `successfulsuccess-ecr` / `infra/ecr.yml` |
 | `make aws-push` | builds and pushes the backend image (runs `aws-ecr` first) |
-| `make aws-deploy-backend` | `successfulsuccess-backend` / `infra/backend.yml` (runs `aws-push` first, then `aws-migrate`) |
-| `make aws-deploy-auth` | `successfulsuccess-auth` / `infra/auth.yml` |
+| `make aws-deploy-backend` | `successfulsuccess-backend` / `infra/backend.yml` (runs `aws-push` first, then `aws-migrate`, then updates the worker functions) |
+| `make aws-update-workers` | `update-function-code` on the report builder and agenda parser (runs `aws-push` first) |
 | `make aws-deploy-frontend` | `successfulsuccess-frontend` / `infra/frontend.yml` |
 | `make aws-logs` / `aws-status` / `aws-migrate` | backend function helpers |
-| `make aws-deploy-reports` | `successfulsuccess-reports` / `infra/reports.yml` (Lab 5; runs `aws-push` first) |
-| `make aws-deploy-ai` | `successfulsuccess-ai` / `infra/ai.yml` (Lab 6; runs `aws-push` first) |
+| `make aws-auth-env` / `report-now` / `dlq-status` | read Terraform outputs (auth, reports) |
 | `make aws-ai-url` / `aws-logs-ai` / `aws-agendas` | agenda parser helpers (Lab 6) |
+| `make infra-init` / `infra-fmt` / `infra-validate` / `infra-plan` | Terraform in `infra/`; never apply |
 
 ### Backend Lambda: network (looked up with the AWS CLI on 2026-10-13)
 
@@ -91,8 +120,8 @@ defaulting to `successfulsuccess`.
   explicit association, so all six use it. Routes: `172.31.0.0/16 → local`,
   `0.0.0.0/0 → igw-06a8f4f804954e7b8`. The internet route does not help the Lambda: VPC Lambda ENIs
   get no public IP, and there is **no NAT gateway**.
-- VPC endpoints: before Lab 5, none. `infra/reports.yml` creates the S3 gateway endpoint
-  (`com.amazonaws.us-east-1.s3`) on the route tables `make aws-deploy-reports` looks up for the VPC.
+- VPC endpoints: before Lab 5, none. `infra/reports.tf` has the S3 gateway endpoint
+  (`com.amazonaws.us-east-1.s3`) on `var.route_table_ids` (`rtb-0fda711f924ebbb89`).
 - Security group of the function: `sg-06b7e429066e1c5f3` (`FunctionSecurityGroup`, no inbound,
   all outbound). The database's SG `sg-050a697dbe192fd34` allows 5432 only from that group, so the
   report builder must use `sg-06b7e429066e1c5f3` (or the DB SG must get a new ingress rule).
@@ -117,10 +146,11 @@ defaulting to `successfulsuccess`.
   `docker build --platform linux/amd64 --provenance=false -f backend/Dockerfile.lambda
   -t <repo>:$(IMAGE_TAG) ./backend` and `docker push` (`IMAGE_TAG` defaults to `latest`).
 - The stack is deployed with the image **pinned by digest**: `make aws-deploy-backend` resolves
-  the `latest` tag to a digest and passes `ImageUri=<repo>@sha256:...`; the reports and AI stacks
-  do the same. Deployed on 2026-10-27: the API and the agenda parser on
+  the `latest` tag to a digest and passes `ImageUri=<repo>@sha256:...`; `make aws-update-workers`
+  pins the report builder and agenda parser on the same digest (Terraform ignores their image).
+  Deployed on 2026-10-27: the API and the agenda parser on
   `...successfulsuccess-backend@sha256:e57dac2c7a7c67c65927cb6b4e0064ddef6441a3640b7bfa0209a05f8aa331af`;
-  the report builder still on `sha256:b3b0804f...` (2026-10-14) until `make aws-deploy-reports`.
+  the report builder still on `sha256:b3b0804f...` (2026-10-14) until `make aws-update-workers`.
 
 ### Database connection (API Lambda)
 
@@ -181,8 +211,8 @@ record is [docs/adr/0006-llm-agenda-parsing.md](docs/adr/0006-llm-agenda-parsing
 
 ### Ground rules (from the owner)
 
-- New Lab 6 infra lives in **one** template, `infra/ai.yml`, stack `successfulsuccess-ai`, tagged
-  `PROJECT_NAME` like the others.
+- Lab 6 infra lives in `infra/ai.tf` (was the template `infra/ai.yml`, stack
+  `successfulsuccess-ai`), tagged `PROJECT_NAME` like the others.
 - The model is a **setting**, never code: `PARSER_PROVIDER` (`anthropic` = Messages API on Bedrock
   via `AnthropicBedrockMantle`; `converse` = Bedrock Converse; `anthropic_api` = the Claude API
   via `anthropic.Anthropic()`, same request as `anthropic`; `fake` = no model) and
@@ -201,7 +231,8 @@ record is [docs/adr/0006-llm-agenda-parsing.md](docs/adr/0006-llm-agenda-parsing
   (`aws/ssm` key), read once at cold start by `providers.warm_up()`; the role has
   `ssm:GetParameter` on exactly that parameter. Never print, log or echo the key, and never put
   it in a template, an env var of the function, or a command line. Back to Bedrock later:
-  `make aws-deploy-ai PARSER_PROVIDER=anthropic PARSER_MODEL=anthropic.claude-opus-5-5`.
+  `parser_provider = "anthropic"`, `parser_model = "anthropic.claude-opus-5-5"` in
+  `infra/terraform.tfvars`, then a push (HCP Terraform applies).
 - Each `make llm-hello` / `make parse` against a real model costs real money (≈ $0.012 per Opus
   5.5 parse): ask before running loops of them.
 - IAM stays `bedrock-mantle:CreateInference` + `bedrock:InvokeModel` on `"*"` (narrowing it is a
@@ -238,10 +269,10 @@ record is [docs/adr/0006-llm-agenda-parsing.md](docs/adr/0006-llm-agenda-parsing
   transaction, all users) or `make agendas-local`.
 - Frontend: `components/agenda-dialog.tsx` (paste, Parse/Cancel with AbortController, per-status
   error messages, the agenda form with "suggested" badges), opened from the meeting details dialog.
-  `NEXT_PUBLIC_PARSER_URL` is a build arg: `make aws-deploy-frontend` reads it from the AI stack;
-  compose takes `PARSER_URL` from `.env`. Empty hides Paste an agenda.
-- Deploy order after backend changes: `make aws-deploy-backend` (push + migrate), then
-  `make aws-deploy-ai PARSER_PROVIDER=... PARSER_MODEL=...`, then `make aws-deploy-frontend` if the
-  parser URL or the UI changed. Switching models later is only `make aws-deploy-ai` with new values.
+  `NEXT_PUBLIC_PARSER_URL` is a build arg: `make aws-deploy-frontend` reads it from the Terraform
+  output `parser_url`; compose takes `PARSER_URL` from `.env`. Empty hides Paste an agenda.
+- Deploy order after backend changes: `make aws-deploy-backend` (push + migrate + new image on the
+  builder and parser), then `make aws-deploy-frontend` if the parser URL or the UI changed.
+  Switching models is `parser_provider` / `parser_model` in `infra/terraform.tfvars` and a push.
 - Tests: `tests/test_agenda_parser.py`, `tests/test_agenda_lambda.py`, `tests/test_agenda_api.py`;
   no test calls a model (stub SDK clients, scripted providers, the fake provider).

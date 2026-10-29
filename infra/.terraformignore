@@ -1,0 +1,5 @@
+# Left out of the configuration uploaded to HCP Terraform. Remote runs take
+# secrets from the workspace's Sensitive variables, never from this folder.
+secrets.auto.tfvars
+.terraform/
+*.tfstate*

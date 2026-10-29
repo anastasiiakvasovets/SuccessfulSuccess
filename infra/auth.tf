@@ -113,7 +113,8 @@ resource "aws_cognito_user_pool_client" "web" {
   name         = "${var.project_name}-web"
   user_pool_id = aws_cognito_user_pool.users.id
 
-  generate_secret = false
+  # No client secret. generate_secret is left out on purpose: import cannot read
+  # it back, and setting it (even to false) then forces a new client and client id.
   explicit_auth_flows = [
     "ALLOW_USER_SRP_AUTH",
     "ALLOW_REFRESH_TOKEN_AUTH",
@@ -121,14 +122,11 @@ resource "aws_cognito_user_pool_client" "web" {
   prevent_user_existence_errors = "ENABLED"
   enable_token_revocation       = true
 
+  # In Cognito's default units: hours, hours and days. The provider reads those
+  # defaults back as no token_validity_units block, so the block is left out.
   access_token_validity  = 1
   id_token_validity      = 1
   refresh_token_validity = 30
-  token_validity_units {
-    access_token  = "hours"
-    id_token      = "hours"
-    refresh_token = "days"
-  }
 
   # Referencing the provider also makes the client wait for it.
   supported_identity_providers = concat(

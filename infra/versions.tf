@@ -66,8 +66,8 @@ locals {
   partition  = data.aws_partition.current.partition
   region     = data.aws_region.current.region
 
-  # Code is deployed by GitHub Actions; this is only used if a function is ever
-  # created from scratch (every aws_lambda_function ignores image_uri).
+  # Code is deployed by `make aws-update-workers`; this is only used if a function
+  # is ever created from scratch (every aws_lambda_function ignores image_uri).
   image_uri = var.image_uri != "" ? var.image_uri : "${data.aws_cloudformation_stack.ecr.outputs["RepositoryUri"]}:latest"
 
   # Every origin the site is served from: the CloudFront site and the dev server.

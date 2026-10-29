@@ -91,7 +91,7 @@ variable "fail_week" {
 variable "image_uri" {
   type        = string
   default     = ""
-  description = "Backend image for a function created from scratch. Empty: <RepositoryUri>:latest. Ignored afterwards (GitHub Actions deploys code)."
+  description = "Backend image for a function created from scratch. Empty: <RepositoryUri>:latest. Ignored afterwards (make aws-update-workers deploys code)."
 }
 
 variable "architecture" {

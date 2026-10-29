@@ -1,0 +1,5 @@
+GoogleIdentityProvider	AWS::Cognito::UserPoolIdentityProvider	Google
+ManagedLoginBranding	AWS::Cognito::ManagedLoginBranding	us-east-1_xgnKmaDDO|279ee64a-fd6f-4074-a197-98947dbf61a8
+UserPool	AWS::Cognito::UserPool	us-east-1_xgnKmaDDO
+UserPoolClient	AWS::Cognito::UserPoolClient	7kbe5h0m3qbr70us2niiumqc15
+UserPoolDomain	AWS::Cognito::UserPoolDomain	kvasovets

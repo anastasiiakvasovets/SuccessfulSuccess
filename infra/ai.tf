@@ -105,9 +105,10 @@ resource "aws_lambda_function" "parser" {
     }
   }
 
-  # GitHub Actions deploys the image.
+  # `make aws-update-workers` deploys the image (aws-deploy-backend runs it too);
+  # versions are never published.
   lifecycle {
-    ignore_changes = [image_uri]
+    ignore_changes = [image_uri, publish]
   }
 }
 

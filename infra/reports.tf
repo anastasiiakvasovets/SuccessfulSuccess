@@ -122,6 +122,8 @@ resource "aws_sqs_queue" "report_requests_dlq" {
   name                      = "${local.queue_name}-dlq"
   message_retention_seconds = 1209600
   sqs_managed_sse_enabled   = true
+  # SQS's default today (1 MiB); the provider's default is still 256 KiB.
+  max_message_size = 1048576
 
   # Only the main queue may use this one as its DLQ. Its ARN is built from its
   # name: a reference would be circular (the main queue points here).
@@ -137,6 +139,8 @@ resource "aws_sqs_queue" "report_requests" {
   # At least 6x the builder's timeout.
   visibility_timeout_seconds = 360
   sqs_managed_sse_enabled    = true
+  # SQS's default today (1 MiB); the provider's default is still 256 KiB.
+  max_message_size = 1048576
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.report_requests_dlq.arn
@@ -238,9 +242,10 @@ resource "aws_lambda_function" "builder" {
     }
   }
 
-  # GitHub Actions deploys the image.
+  # `make aws-update-workers` deploys the image (aws-deploy-backend runs it too);
+  # versions are never published.
   lifecycle {
-    ignore_changes = [image_uri]
+    ignore_changes = [image_uri, publish]
   }
 
   # The endpoint must be routable before the first PutObject.
@@ -306,8 +311,9 @@ resource "aws_cloudwatch_log_group" "mailer" {
   retention_in_days = 7
 }
 
-# Only used when the function is created from scratch: code changes go out
-# through GitHub Actions (filename and source_code_hash are ignored).
+# Only used when the function is created from scratch (filename and
+# source_code_hash are ignored). A change to index.py goes out by hand:
+# aws lambda update-function-code --zip-file with this archive.
 data "archive_file" "mailer" {
   type        = "zip"
   source_file = "${path.module}/lambda/report_mailer/index.py"
@@ -340,7 +346,7 @@ resource "aws_lambda_function" "mailer" {
   }
 
   lifecycle {
-    ignore_changes = [filename, source_code_hash]
+    ignore_changes = [filename, source_code_hash, publish]
   }
 }
 
@@ -401,10 +407,11 @@ resource "aws_scheduler_schedule" "weekly_report" {
   }
 
   # A command on the queue, not a direct invoke: retries and the DLQ come with
-  # it. week null means "the week before", decided by the builder.
+  # it. week null means "the week before", decided by the builder. The exact
+  # string the schedule holds: jsonencode() would reorder and respace it.
   target {
     arn      = aws_sqs_queue.report_requests.arn
     role_arn = aws_iam_role.scheduler.arn
-    input    = jsonencode({ week = null, source = "schedule" })
+    input    = "{\"week\": null, \"source\": \"schedule\"}"
   }
 }

@@ -1,0 +1,61 @@
+data.archive_file.mailer: Reading...
+data.archive_file.mailer: Read complete after 0s [id=5d80117a803dbb48bdca3d6401e24d22309652f1]
+data.aws_cloudformation_stack.frontend: Reading...
+data.aws_cloudformation_stack.ecr: Reading...
+data.aws_cloudformation_stack.backend: Reading...
+data.aws_partition.current: Reading...
+aws_cloudwatch_log_group.builder: Refreshing state... [id=/aws/lambda/successfulsuccess-report-builder]
+data.aws_caller_identity.current: Reading...
+data.aws_region.current: Reading...
+aws_iam_role.mailer: Refreshing state... [id=successfulsuccess-reports-MailerRole-TWC33UJl9GHQ]
+aws_iam_role.builder: Refreshing state... [id=successfulsuccess-reports-BuilderRole-JPft27avTz5X]
+data.aws_partition.current: Read complete after 0s [id=aws]
+data.aws_region.current: Read complete after 0s [id=us-east-1]
+aws_cognito_user_pool.users: Refreshing state... [id=us-east-1_xgnKmaDDO]
+aws_cloudwatch_log_group.parser: Refreshing state... [id=/aws/lambda/successfulsuccess-agenda-parser]
+aws_iam_role.parser: Refreshing state... [id=successfulsuccess-ai-ParserRole-obsAxq4CzhVx]
+data.aws_caller_identity.current: Read complete after 0s [id=980553487282]
+aws_sesv2_email_identity.sender: Refreshing state... [id=<REPORT_SENDER>]
+aws_cloudwatch_log_group.mailer: Refreshing state... [id=/aws/lambda/successfulsuccess-report-mailer]
+data.aws_cloudformation_stack.ecr: Read complete after 1s [id=arn:aws:cloudformation:us-east-1:980553487282:stack/successfulsuccess-ecr/b89d8960-bcc4-11f1-9281-12e3e10c7ccb]
+aws_sqs_queue.report_requests_dlq: Refreshing state... [id=https://sqs.us-east-1.amazonaws.com/980553487282/successfulsuccess-report-requests-dlq]
+aws_iam_role.scheduler: Refreshing state... [id=successfulsuccess-reports-SchedulerRole-owr1hcMdqr6O]
+data.aws_cloudformation_stack.backend: Read complete after 1s [id=arn:aws:cloudformation:us-east-1:980553487282:stack/successfulsuccess-backend/10a3f290-bcd2-11f1-b057-0e40ba705f19]
+aws_s3_bucket.reports: Refreshing state... [id=successfulsuccess-reports-980553487282]
+data.aws_cloudformation_stack.frontend: Read complete after 1s [id=arn:aws:cloudformation:us-east-1:980553487282:stack/successfulsuccess-frontend/678abbf0-bcd4-11f1-aa93-12fff99973eb]
+data.aws_lambda_function.api: Reading...
+aws_cognito_user_pool_domain.this: Refreshing state... [id=kvasovets]
+aws_cognito_identity_provider.google[0]: Refreshing state... [id=us-east-1_xgnKmaDDO:Google]
+aws_iam_role_policy.mailer_read_reports_send_email: Refreshing state... [id=successfulsuccess-reports-MailerRole-TWC33UJl9GHQ:read-reports-send-email]
+aws_iam_role_policy_attachment.mailer_basic_execution: Refreshing state... [id=successfulsuccess-reports-MailerRole-TWC33UJl9GHQ/arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]
+aws_lambda_function.mailer: Refreshing state... [id=successfulsuccess-report-mailer]
+aws_cognito_user_pool_client.web: Refreshing state... [id=7kbe5h0m3qbr70us2niiumqc15]
+aws_cognito_managed_login_branding.web: Refreshing state...
+aws_iam_role_policy_attachment.parser_basic_execution: Refreshing state... [id=successfulsuccess-ai-ParserRole-obsAxq4CzhVx/arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]
+aws_iam_role_policy.parser_call_bedrock: Refreshing state... [id=successfulsuccess-ai-ParserRole-obsAxq4CzhVx:call-bedrock]
+aws_iam_role_policy.parser_read_claude_api_key: Refreshing state... [id=successfulsuccess-ai-ParserRole-obsAxq4CzhVx:read-claude-api-key]
+aws_lambda_function.parser: Refreshing state... [id=successfulsuccess-agenda-parser]
+aws_iam_role_policy.builder_write_reports: Refreshing state... [id=successfulsuccess-reports-BuilderRole-JPft27avTz5X:write-reports]
+aws_iam_role_policy_attachment.builder_vpc_access: Refreshing state... [id=successfulsuccess-reports-BuilderRole-JPft27avTz5X/arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole]
+data.aws_lambda_function.api: Read complete after 1s [id=successfulsuccess-backend]
+aws_sqs_queue.report_requests: Refreshing state... [id=https://sqs.us-east-1.amazonaws.com/980553487282/successfulsuccess-report-requests]
+aws_vpc_endpoint.s3: Refreshing state... [id=vpce-022c326982c06adcd]
+aws_iam_role_policy.scheduler_send_report_requests: Refreshing state... [id=successfulsuccess-reports-SchedulerRole-owr1hcMdqr6O:send-report-requests]
+aws_iam_role_policy.builder_read_report_requests: Refreshing state... [id=successfulsuccess-reports-BuilderRole-JPft27avTz5X:read-report-requests]
+aws_scheduler_schedule.weekly_report: Refreshing state... [id=default/successfulsuccess-weekly-report]
+aws_lambda_permission.parser_url_invoke: Refreshing state... [id=successfulsuccess-ai-ParserUrlInvokePermission-eQW0bbRW3bVL]
+aws_lambda_permission.parser_url: Refreshing state... [id=successfulsuccess-ai-ParserUrlPermission-0z09tJvHuEQr]
+aws_lambda_function_url.parser: Refreshing state... [id=successfulsuccess-agenda-parser]
+aws_s3_bucket_public_access_block.reports: Refreshing state... [id=successfulsuccess-reports-980553487282]
+aws_s3_bucket_ownership_controls.reports: Refreshing state... [id=successfulsuccess-reports-980553487282]
+aws_s3_bucket_server_side_encryption_configuration.reports: Refreshing state... [id=successfulsuccess-reports-980553487282]
+aws_lambda_permission.mailer_s3: Refreshing state... [id=successfulsuccess-reports-MailerInvokePermission-m1O5VDaafbNI]
+aws_s3_bucket_lifecycle_configuration.reports: Refreshing state... [id=successfulsuccess-reports-980553487282]
+aws_s3_bucket_notification.reports: Refreshing state... [id=successfulsuccess-reports-980553487282]
+aws_lambda_function.builder: Refreshing state... [id=successfulsuccess-report-builder]
+aws_lambda_event_source_mapping.report_requests: Refreshing state... [id=833c286c-dc9c-4723-b550-c58c4ed8604a]
+
+No changes. Your infrastructure matches the configuration.
+
+Terraform has compared your real infrastructure against your configuration
+and found no differences, so no changes are needed.

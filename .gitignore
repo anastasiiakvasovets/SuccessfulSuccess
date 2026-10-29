@@ -30,3 +30,5 @@ budget-notify.json
 tfplan
 crash.log
 *.auto.tfvars.secret
+# secrets and email addresses for local runs, written from .env
+infra/secrets.auto.tfvars

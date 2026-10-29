@@ -19,7 +19,7 @@ export const isGoogleConfigured = isAuthConfigured && authConfig.googleEnabled &
 
 /**
  * Idempotent; browser only, because the OAuth redirect URLs use the page's origin.
- * Both must be listed on the app client exactly (see aws-deploy-auth in the Makefile).
+ * Both must be listed on the app client exactly (callback_urls / logout_urls in infra/auth.tf).
  */
 export function configureAuth() {
   if (configured || !isAuthConfigured || typeof window === "undefined") return

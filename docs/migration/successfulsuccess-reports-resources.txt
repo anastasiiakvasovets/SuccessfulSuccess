@@ -1,0 +1,15 @@
+BuilderLogGroup	AWS::Logs::LogGroup	/aws/lambda/successfulsuccess-report-builder
+BuilderRole	AWS::IAM::Role	successfulsuccess-reports-BuilderRole-JPft27avTz5X
+MailerInvokePermission	AWS::Lambda::Permission	successfulsuccess-reports-MailerInvokePermission-m1O5VDaafbNI
+MailerLogGroup	AWS::Logs::LogGroup	/aws/lambda/successfulsuccess-report-mailer
+MailerRole	AWS::IAM::Role	successfulsuccess-reports-MailerRole-TWC33UJl9GHQ
+ReportBuilder	AWS::Lambda::Function	successfulsuccess-report-builder
+ReportMailer	AWS::Lambda::Function	successfulsuccess-report-mailer
+ReportRequests	AWS::SQS::Queue	https://sqs.us-east-1.amazonaws.com/980553487282/successfulsuccess-report-requests
+ReportRequestsDlq	AWS::SQS::Queue	https://sqs.us-east-1.amazonaws.com/980553487282/successfulsuccess-report-requests-dlq
+ReportRequestsMapping	AWS::Lambda::EventSourceMapping	833c286c-dc9c-4723-b550-c58c4ed8604a
+ReportsBucket	AWS::S3::Bucket	successfulsuccess-reports-980553487282
+S3Endpoint	AWS::EC2::VPCEndpoint	vpce-022c326982c06adcd
+SchedulerRole	AWS::IAM::Role	successfulsuccess-reports-SchedulerRole-owr1hcMdqr6O
+SenderIdentity	AWS::SES::EmailIdentity	<REPORT_SENDER>
+WeeklySchedule	AWS::Scheduler::Schedule	successfulsuccess-weekly-report

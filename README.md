@@ -30,41 +30,41 @@ The backend applies migrations on start.
 
 Every page except `/`, `/login/`, `/auth/callback/` and `/privacy/`, and every `/api/v1` endpoint, needs a
 signed-in user, and each user sees only their own meetings. Sign-in is an AWS
-Cognito user pool (`infra/auth.yml`): email + password, and Google when it is
-configured. Even for local development the pool lives in AWS (it is free at
-this scale):
+Cognito user pool (`infra/auth.tf`, applied by HCP Terraform, see
+[Infrastructure](#infrastructure-terraform)): email + password, and Google when
+it is configured. Even for local development the pool lives in AWS (it is free
+at this scale):
 
 ```bash
-make aws-deploy-auth   # create/update the user pool and its app client
-make aws-auth-env      # prints COGNITO_* lines: paste them into .env
+make aws-auth-env      # prints COGNITO_* lines (from Terraform outputs): paste them into .env
 docker compose up -d   # restart so the API and the frontend pick them up
 ```
 
-**`.env` variables** (never commit `.env`; the Google secret only goes to
-CloudFormation as a `NoEcho` parameter, never into the frontend build):
+**`.env` variables** (never commit `.env`):
 
 | Variable | What it is |
 | --- | --- |
-| `COGNITO_DOMAIN_PREFIX` | Cognito's sign-in domain, `https://<prefix>.auth.<region>.amazoncognito.com`. Unique per region; empty uses `<PROJECT_NAME>-<account id>` |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | The Google OAuth client. Empty: email + password only |
-| `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `COGNITO_DOMAIN`, `COGNITO_GOOGLE_ENABLED` | Local development only, from `make aws-auth-env`. The AWS build reads them from the auth stack itself |
+| `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `COGNITO_DOMAIN`, `COGNITO_GOOGLE_ENABLED` | Local development only, from `make aws-auth-env`. The AWS build reads them from the Terraform outputs itself |
+
+The pool's own settings (domain prefix, Google client id and secret) are
+Terraform variables, not `.env` values: see the variables table below.
 
 **Google client**: in Google Cloud console → *APIs & Services* → *Credentials*,
 create an OAuth client of type *Web application* (publish the consent screen, or
 add yourself as a test user). Its *Authorized redirect URI* is Cognito's, not the
-site's: `https://<COGNITO_DOMAIN_PREFIX>.auth.<region>.amazoncognito.com/oauth2/idpresponse`
-(`make aws-deploy-auth` prints it). Put the id and secret in `.env`.
+site's: `https://<domain_prefix>.auth.<region>.amazoncognito.com/oauth2/idpresponse`
+(`terraform -chdir=infra output -raw google_redirect_uri` prints it).
 
-**Redirect URLs**: `aws-deploy-auth` registers `<origin>/auth/callback/` (sign-in)
-and `<origin>/` (sign-out) on the app client for every origin the site is served
-from: the CloudFront domain (read from the frontend stack's outputs once it
-exists), `AWS_FRONTEND_DOMAIN` if set, and `http://localhost:$FRONTEND_PORT`.
-Cognito compares them exactly, so `trailingSlash` is on in dev as well.
+**Redirect URLs**: Terraform registers `<origin>/auth/callback/` (sign-in) and
+`<origin>/` (sign-out) on the app client for the CloudFront domain (read from
+the frontend stack) and `local_origin` (`http://localhost:3000`). Cognito
+compares them exactly, so `trailingSlash` is on in dev as well. A new
+CloudFront distribution therefore needs a Terraform run.
 
-**Deploy order**: `aws-deploy-auth` → `aws-deploy-backend` (it needs the pool to
-check tokens) → `aws-deploy-frontend` (it re-runs `aws-deploy-auth` so the
-CloudFront URL is allowed, then bakes the pool's ids into the build; without an
-auth stack it builds with sign-in hidden). `make aws-deploy` runs all three.
+**Deploy order**: the user pool (Terraform) → `aws-deploy-backend` (it needs the
+pool to check tokens) → `aws-deploy-frontend` (it bakes the pool's ids and the
+parser URL from the Terraform outputs into the build; without them it builds
+with sign-in hidden). `make aws-deploy` runs the last two.
 
 **Testing**: open `<site>/login/`. Sign up with an email (Cognito mails a code),
 or press *Continue with Google*: Google → Cognito → `<site>/auth/callback/`, which
@@ -140,11 +140,76 @@ Things that are already taken care of, and why:
 - Keep `.env` with LF line endings (copying `.env.example` does): `make` reads
   it directly, and a CRLF `.env` leaves a stray `\r` on every value.
 
+## Infrastructure (Terraform)
+
+Since Lab 7 `infra/` holds two kinds of infrastructure:
+
+| Where | What | How it is changed |
+| --- | --- | --- |
+| Terraform: `auth.tf`, `reports.tf`, `ai.tf` (+ `versions.tf`, `variables.tf`, `outputs.tf`, `terraform.tfvars`, `lambda/`) | Cognito sign-in; the weekly report (SES identities, bucket, S3 endpoint, queues, builder and mailer Lambdas, schedule); the agenda parser and its function URL | HCP Terraform, after a push to `main` |
+| CloudFormation: `ecr.yml`, `backend.yml`, `frontend.yml` | Image registry; API Lambda + RDS database + network; S3 + CloudFront site | `make aws-ecr`, `make aws-deploy-backend`, `make aws-deploy-frontend` |
+
+The Terraform resources were imported from the former `auth`, `reports` and
+`ai` stacks (see [docs/migration/inventory.md](docs/migration/inventory.md) and
+`docs/migration/plan-no-changes.txt`). Terraform reads the three CloudFormation
+stacks with `data "aws_cloudformation_stack"`, never the other way round.
+
+**State and runs**: organization `ooad-nastyakvasovets`, workspace
+`successfulsuccess-dev` in HCP Terraform (`cloud {}` block in `versions.tf`).
+**`terraform apply` only happens in HCP Terraform**, after a push to `main`; no
+make target and no local command applies. Locally:
+
+```bash
+terraform login        # once: stores an HCP Terraform API token
+make infra-init        # terraform -chdir=infra init (connects to the workspace)
+make infra-fmt         # terraform fmt
+make infra-validate    # terraform validate
+make infra-plan        # preview what the next run would change (never applies)
+```
+
+The `make` targets read Terraform outputs with `terraform -chdir=infra output -raw <name>`
+(`user_pool_id`, `issuer`, `queue_url`, `parser_url`, ... — all in `infra/outputs.tf`),
+so they need `make infra-init` and `terraform login` once.
+
+**Variables** (`infra/variables.tf`):
+
+| Variable | Default / value | Secret? | Set where |
+| --- | --- | --- | --- |
+| `project_name`, `aws_region`, `local_origin` | `successfulsuccess`, `us-east-1`, `http://localhost:3000` | no | `infra/terraform.tfvars` |
+| `domain_prefix`, `google_client_id` | Cognito domain prefix, Google OAuth client id | no | `infra/terraform.tfvars` |
+| `route_table_ids`, `schedule_expression`, `fail_week` | S3 endpoint route tables; `cron(0 7 ? * MON *)`; empty | no | `infra/terraform.tfvars` |
+| `architecture`, `parser_provider`, `parser_model`, `anthropic_api_key_parameter`, `log_level` | `x86_64`, `anthropic_api`, `claude-opus-5-5`, `/successfulsuccess/anthropic-api-key`, `INFO` | no (the parameter's *name* only) | `infra/terraform.tfvars` |
+| `image_uri` | empty (`<RepositoryUri>:latest`, only for a function created from scratch) | no | default |
+| `google_client_secret` | Google OAuth client secret | **yes** (`sensitive`) | HCP workspace variable, **Sensitive** |
+| `db_password` | RDS master password, for the builder's `DATABASE_URL` | **yes** (`sensitive`) | HCP workspace variable, **Sensitive** |
+| `sender_email`, `report_recipient` | SES sender / recipient addresses | personal, not secret | HCP workspace variables, never in a committed file |
+
+For a run with local execution, the four values in the last rows go into
+`infra/secrets.auto.tfvars` (written from `.env`, **gitignored**) or
+`$env:TF_VAR_<name>`. The Claude API key itself is not a Terraform variable: it
+stays in the SSM SecureString named by `anthropic_api_key_parameter`. Terraform
+state holds the secrets in clear text, which is one more reason it lives only in
+HCP Terraform.
+
+Changing a setting (the schedule, `fail_week`, the parser model, ...) means
+editing `infra/terraform.tfvars` (or the workspace variable), checking it with
+`make infra-plan` and pushing to `main`.
+
+**Code is not Terraform's job.** The report builder and the agenda parser run the
+backend image, and Terraform ignores their `image_uri` on purpose.
+`make aws-update-workers` pushes the image, points both functions at it by
+digest (`aws lambda update-function-code`), waits for them
+(`aws lambda wait function-updated`) and prints the digest each one runs.
+`make aws-deploy-backend` does the same after its migrations, so one backend
+deploy ships the API and both workers together. The report mailer's code
+(`infra/lambda/report_mailer/`) is ignored too; a change to it goes out by hand.
+
 ## Deploy to AWS
 
-`infra/` holds four CloudFormation templates: `auth.yml` (Cognito sign-in),
-`ecr.yml` (image registry), `backend.yml` (API and database) and `frontend.yml`
-(site). `make` reads `.env`,
+`infra/` holds three CloudFormation templates deployed by `make`: `ecr.yml`
+(image registry), `backend.yml` (API and database) and `frontend.yml` (site);
+sign-in, the weekly report and the agenda parser are Terraform (see above).
+`make` reads `.env`,
 so the `aws-*` targets pick up the credentials and settings from there; `.env` is
 gitignored, so real keys never reach the repository. The AWS CLI runs in the
 `amazon/aws-cli` container, so nothing has to be installed on the host besides
@@ -169,18 +234,18 @@ Cost Explorer or Resource Groups to see everything the project owns.
 
 ```bash
 make aws-whoami   # check the credentials work
-make aws-deploy   # sign-in, then the backend, then the frontend built against both
+make aws-deploy   # the backend, then the frontend built against it
 ```
 
-`aws-deploy` runs `aws-deploy-auth` and then the two steps below in order: the
-backend checks tokens from the user pool, and the frontend bakes the API URL and
-the pool's ids into its build. Each step can also run on its own.
+`aws-deploy` runs the two steps below in order: the backend checks tokens from
+the user pool, and the frontend bakes the API URL and the pool's ids into its
+build. Each step can also run on its own. The user pool, the report and the
+parser come from HCP Terraform, not from these targets.
 
 The backend Lambda sits in a VPC with no internet access, so it cannot download
 the pool's signing keys itself; `aws-deploy-backend` fetches them
-(`<issuer>/.well-known/jwks.json`) and passes them in as `COGNITO_JWKS`.
-`aws-deploy-frontend` re-deploys the auth stack once the CloudFront URL exists,
-so Cognito may redirect back to the site after Google sign-in.
+(`<issuer>/.well-known/jwks.json`, `issuer` from the Terraform outputs) and
+passes them in as `COGNITO_JWKS`.
 
 Fill these in `.env` first:
 
@@ -191,16 +256,13 @@ AWS_REGION=us-east-1
 PROJECT_NAME=successfulsuccess   # prefixes every resource name, and the PROJECT_NAME tag
 AWS_DB_PASSWORD=...          # 8-41 chars, [A-Za-z0-9_-] only
 AWS_CORS_ORIGINS=            # empty: follow the frontend's URLs (* until it exists)
-COGNITO_DOMAIN_PREFIX=       # optional: Cognito sign-in domain prefix (see "Authentication" above)
-GOOGLE_CLIENT_ID=            # optional: Google sign-in
-GOOGLE_CLIENT_SECRET=
 AWS_FRONTEND_DOMAIN=         # optional, e.g. app.example.com
 ```
 
 ### 1. Backend — Lambda function URL, Aurora Serverless v2
 
 ```bash
-make aws-deploy-backend   # ECR + build & push + create/update the stack + migrate, prints the URL
+make aws-deploy-backend   # ECR + build & push + create/update the stack + migrate + update the workers, prints the URL
 ```
 
 The API runs as a **Lambda function** from a container image
@@ -239,7 +301,8 @@ still busy with an earlier update, the target waits for it rather than failing.
 | `make aws-status` | Stack outputs plus the API function's state |
 | `make aws-logs` | Follow the function logs from CloudWatch |
 | `make aws-migrate` | Apply migrations again on their own |
-| `make aws-destroy` | Delete every stack (asks first — the database goes too) |
+| `make aws-update-workers` | Push the image and put it on the report builder and agenda parser (prints their digests) |
+| `make aws-destroy` | Delete the CloudFormation stacks (asks first — the database goes too); refuses while Terraform still manages sign-in, reports and the parser |
 
 The image is built for `AWS_LAMBDA_ARCH` (`x86_64` by default).
 `AWS_LAMBDA_ARCH=arm64 make aws-deploy-backend` is ~20% cheaper and builds
@@ -310,36 +373,34 @@ The API keeps its function URL: a function URL cannot take a custom domain.
 ### 4. Weekly report (Lab 5)
 
 Every Monday at 07:00 Kyiv time a CSV of last week's meetings is built, saved to S3 and emailed.
-Everything is in `infra/reports.yml` (stack `<PROJECT_NAME>-reports`):
+Everything is in `infra/reports.tf` (Terraform, applied by HCP Terraform):
 
 - **EventBridge Scheduler** (`cron(0 7 ? * MON *)`, Europe/Kyiv) and `make report-now` put
   `{"week": ..., "source": ...}` on the SQS queue `report-requests` (3 attempts, then `report-requests-dlq`).
 - The **report builder** Lambda (the backend image, handler `app.reports.lambda_handler.handler`, in the
   VPC next to the database) reads the meetings and writes `reports/<week>.csv`. With no NAT, it reaches
   S3 through a free gateway endpoint.
-- That upload's `ObjectCreated` event starts the **report mailer** Lambda (inline in the template,
-  outside the VPC), which sends the CSV as an attachment through **SES**. The builder does not know it
-  exists.
-- Reports expire after 90 days. In the SES sandbox the sender (`REPORT_SENDER`) and recipient
-  (`REPORT_RECIPIENT`, both in `.env`) must be verified addresses: SES mails each a link on first deploy.
+- That upload's `ObjectCreated` event starts the **report mailer** Lambda (`infra/lambda/`, outside
+  the VPC), which sends the CSV as an attachment through **SES**. The builder does not know it exists.
+- Reports expire after 90 days. In the SES sandbox the sender (`sender_email`) and recipient
+  (`report_recipient`, both Terraform variables) must be verified addresses: SES mails each a link
+  when its identity is created.
 
 ```bash
 make seed-weeks                    # local: demo meetings over the last two ISO weeks
 make report-local WEEK=2026-W41    # local: print one week's CSV from the compose database
-make aws-deploy-reports            # push the image, deploy the stack (looks up VPC, DB, image itself)
 make report-now WEEK=2026-W40      # build (and email) one week's report on demand, through SQS
 make dlq-status                    # messages waiting / in flight in the queue and the DLQ
 ```
 
-`make aws-deploy-reports SCHEDULE="rate(5 minutes)"` fires the schedule every 5 minutes for testing;
-deploy again without it to go back to Mondays.
+`schedule_expression = "rate(5 minutes)"` fires the schedule every 5 minutes for testing; set it
+back to `cron(0 7 ? * MON *)` afterwards (both through a Terraform run).
 
-**Testing the dead-letter queue:** `make aws-deploy-reports FAIL_WEEK=2026-W01` makes the builder raise
-for that week. `make report-now WEEK=2026-W01`, then watch `make dlq-status`: each failed attempt comes
-back after the 6-minute visibility timeout, and after the third (~12 minutes) the message is in the DLQ.
-Deploy again without `FAIL_WEEK`, then move the message back with **Start DLQ redrive** in the SQS
-console (or `aws sqs start-message-move-task --source-arn <dlq arn>`); this time the report is built
-and mailed.
+**Testing the dead-letter queue:** `fail_week = "2026-W01"` makes the builder raise for that week.
+`make report-now WEEK=2026-W01`, then watch `make dlq-status`: each failed attempt comes back after the
+6-minute visibility timeout, and after the third (~12 minutes) the message is in the DLQ. Clear
+`fail_week` again, then move the message back with **Start DLQ redrive** in the SQS console (or
+`aws sqs start-message-move-task --source-arn <dlq arn>`); this time the report is built and mailed.
 
 ### Cost
 
@@ -354,8 +415,9 @@ and mailed.
   ACM certificates are free.
 - **ECR** — 500 MB in the free tier; the lifecycle policy keeps five images.
 
-`make aws-destroy` deletes everything, database included, with no snapshot left
-behind. Accounts opened after July 2025 get credits instead of the classic free
+`make aws-destroy` deletes the CloudFormation stacks, database included, with no
+snapshot left behind; the Terraform resources go first, with a destroy run in
+HCP Terraform. Accounts opened after July 2025 get credits instead of the classic free
 tier — check your billing console rather than assuming.
 
 ### Known trade-offs
@@ -421,7 +483,7 @@ sent, so every client shows the same time as the day it was listed under.
 ```
 backend/    FastAPI app (api → services → repositories → models), Alembic, tests
 frontend/   Next.js app, shadcn/ui primitives in components/ui
-infra/      CloudFormation templates behind the aws-* targets
+infra/      Terraform (auth, reports, ai; HCP Terraform) and the CloudFormation templates behind the aws-* targets
 docker-compose.yml
 ```
 
