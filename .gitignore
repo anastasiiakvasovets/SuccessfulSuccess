@@ -21,3 +21,12 @@ budget.json
 budget-notify.json
 # `make aws-agendas` output (saved agendas), deleted after printing
 .aws-agendas.json
+
+# terraform (keep .terraform.lock.hcl in git)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+*.auto.tfvars.secret
