@@ -1,0 +1,33 @@
+# HCP Terraform runs with working directory infra/, so `terraform plan` uploads
+# the whole repository from here. Keep secrets, state and build output out of it.
+# (infra/.terraformignore is not read in that case.)
+#
+# The upload (go-slug) only knows the OS path separator. A bare name matches a
+# file at any depth on every OS; a directory needs a trailing separator, so each
+# directory is listed twice: "/" for Linux and macOS, "\" for Windows. Never put
+# a "/" inside a pattern: on Windows it never matches.
+
+# secrets and state (files)
+.env
+secrets.auto.tfvars
+*.tfstate
+*.tfstate.*
+*.tfplan
+budget.json
+budget-notify.json
+.aws-agendas.json
+tsconfig.tsbuildinfo
+
+# build output and caches (directories)
+node_modules/
+node_modules\
+.next/
+.next\
+out/
+out\
+.pytest_cache/
+.pytest_cache\
+.ruff_cache/
+.ruff_cache\
+__pycache__/
+__pycache__\
