@@ -308,7 +308,7 @@ resource "aws_iam_role_policy" "mailer_read_reports_send_email" {
 
 resource "aws_cloudwatch_log_group" "mailer" {
   name              = "/aws/lambda/${var.project_name}-report-mailer"
-  retention_in_days = 7
+  retention_in_days = 14
 }
 
 # Only used when the function is created from scratch (filename and
