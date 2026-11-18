@@ -447,6 +447,124 @@ tier — check your billing console rather than assuming.
   interfaces slowly, and the security groups wait for them.
 - One Aurora instance: there is no reader to fail over to.
 
+## Deploying to Google Cloud
+
+Lab 9 ([ADR 0008](docs/adr/0008-gcp-core.md)) runs Spry's core on Google Cloud, project
+`spry-kvasovets-2026`, region **`us-central1`**:
+
+```
+browser ──https──→ Firebase Hosting (Next.js static export)
+                     └── /api/** rewrite ──→ Cloud Run (spry-api) ──unix socket──→ Cloud SQL PostgreSQL 16
+```
+
+- **Site:** <https://spry-kvasovets-2026.web.app> (also `https://spry-kvasovets-2026.firebaseapp.com`)
+- **API:** <https://spry-api-23u44bbqpa-uc.a.run.app> (`/health`, `/docs`). The site reaches it on
+  its own origin through the `/api/**` rewrite in `firebase.json`, so the bundle calls relative
+  URLs and needs no CORS.
+
+The infrastructure is Terraform in `gcp/` (provider `google`): Artifact Registry, Cloud Run
+service `spry-api` and migration job `spry-migrate`, Cloud SQL `spry-db` (`db-f1-micro`,
+10 GB SSD), Secret Manager (`spry-database-url`, `spry-db-password`; the password is generated
+by Terraform and never written to a file), and the service accounts. It is a separate root
+module from `infra/`, with its own state, so AWS and GCP runs never mix.
+
+### Prerequisites
+
+- **Docker** (Docker Desktop on Windows), for the API image and the frontend build.
+- **Google Cloud CLI** (`gcloud`), signed in with Application Default Credentials, which
+  Terraform uses:
+
+  ```bash
+  gcloud auth login
+  gcloud auth application-default login
+  gcloud config set project spry-kvasovets-2026
+  ```
+
+- **Firebase CLI** (`npm install -g firebase-tools`), then `firebase login`. The project is set in
+  `.firebaserc`.
+- **Terraform** ≥ 1.10, then `terraform login` for HCP Terraform. State lives in the workspace
+  **`spry-gcp`** in the organization **`ooad-nastyakvasovets`**, set to **Local execution**:
+  plans and applies run on your machine with your ADC, and only the state is stored in HCP
+  Terraform. Run `terraform -chdir=gcp init` once.
+- `infra/` initialised (`make infra-init`): `gcp-deploy-frontend` reads the Cognito ids from its
+  outputs.
+
+On Windows the targets call `gcloud.cmd` and `firebase.cmd`; run them from PowerShell with `make`
+as usual.
+
+### Deploy
+
+```bash
+make gcp-push              # build backend/Dockerfile (linux/amd64), push to Artifact Registry, print api_image
+# put the printed api_image = ".../spry-api@sha256:..." line in gcp/terraform.tfvars
+make gcp-deploy            # terraform -chdir=gcp apply (asks for confirmation), prints the API URL
+make gcp-migrate           # run the spry-migrate Cloud Run job: alembic upgrade head on Cloud SQL
+make gcp-deploy-frontend   # build the static export (API on the same origin) and firebase deploy
+```
+
+`make gcp-plan` previews the changes first. On a brand-new project, run `make gcp-deploy` once
+before `gcp-push`: it creates the registry with a sample image, and `gcp-push` reads the
+registry's URL from the Terraform outputs. Unlike `infra/`, `gcp/` is applied from your machine.
+
+| Command | What it does |
+|---------|--------------|
+| `make gcp-url` | Print the Cloud Run API URL |
+| `make gcp-frontend-url` | Print the Firebase Hosting URL |
+| `make gcp-logs LIMIT=100` | Latest API logs from Cloud Run |
+
+### What is still on AWS
+
+- **Sign-in: Cognito** (+ Google IdP). Cloud Run verifies Cognito access tokens against the pool's
+  public JWKS; the Firebase origins are in the app client's callback and logout URLs
+  (`extra_site_origins` in `infra/terraform.tfvars`).
+- **The weekly report** (EventBridge Scheduler, SQS, the builder, S3, the mailer). The builder still
+  reads the RDS database, not Cloud SQL.
+- **The agenda parser** (Lambda, Claude API). The Firebase build hides "Paste an agenda"
+  (`NEXT_PUBLIC_PARSER_URL=""`).
+- **SES**, which sends the weekly report: Google Cloud has no e-mail sending service.
+
+### Stopping and starting the database
+
+Cloud SQL never pauses, so stop it when nobody is using the app. Storage is still billed while it
+is stopped, and while it is stopped the API answers 503 (`/health` shows it). Starting takes a few
+minutes.
+
+Through Terraform (the state stays in step):
+
+```hcl
+# gcp/terraform.tfvars
+db_activation_policy = "NEVER"   # stopped; "ALWAYS" = running
+```
+
+then `make gcp-deploy`. Or directly, for a quick stop or start:
+
+```bash
+gcloud sql instances patch spry-db --activation-policy=NEVER    # stop
+gcloud sql instances patch spry-db --activation-policy=ALWAYS   # start
+```
+
+A `gcloud` change is not in `terraform.tfvars`: the next `make gcp-deploy` sets the instance back
+to the value there, so update the file too.
+
+### Cost
+
+See [docs/cost-comparison.md](docs/cost-comparison.md). In short: idle with Cloud SQL stopped,
+the core costs **$1.70 a month** (storage); with Cloud SQL running all month **$9.37**. Firebase
+Hosting, Cloud Run (min 0), Secret Manager and Artifact Registry stay in their free tiers at lab
+traffic. The AWS core (RDS `db.t3.micro`) costs ≈ $15.44 a month idle. The AWS `monthly-5usd`
+budget does not cover Google Cloud: set a budget alert in the Google Cloud billing console too.
+
+### Clean up
+
+```bash
+terraform -chdir=gcp destroy
+```
+
+This deletes the Cloud Run service and job, the Cloud SQL instance **with its data** (no backups
+are kept), the secrets and the registry. Firebase Hosting releases are not Terraform-managed:
+remove them with `firebase hosting:disable` if needed. AWS is untouched; remove the Firebase
+origins from `extra_site_origins` in `infra/terraform.tfvars` if the site is gone for good.
+
 ## API
 
 Base path `/api/v1`. Full schema at `/docs`. Everything under it needs
