@@ -122,11 +122,19 @@ resource "aws_cognito_user_pool_client" "web" {
   prevent_user_existence_errors = "ENABLED"
   enable_token_revocation       = true
 
-  # In Cognito's default units: hours, hours and days. The provider reads those
-  # defaults back as no token_validity_units block, so the block is left out.
+  # The values live in AWS (describe-user-pool-client, 2026-11-18): 1 h, 1 h,
+  # 30 days. The units block is explicit: once an update stored the units
+  # (AWS provider bug), leaving it out made the apply fail with
+  # "token_validity_units: block count changed from 0 to 1".
   access_token_validity  = 1
   id_token_validity      = 1
   refresh_token_validity = 30
+
+  token_validity_units {
+    access_token  = "hours"
+    id_token      = "hours"
+    refresh_token = "days"
+  }
 
   # Referencing the provider also makes the client wait for it.
   supported_identity_providers = concat(
