@@ -71,9 +71,8 @@ docker-compose.yml  db (postgres:17) + backend (:8000) + frontend (:3000)
 Zip використовує тільки mailer звіту (`infra/lambda/report_mailer/`), а він не входить у ядро.
 
 `backend/Dockerfile` майже готовий для Cloud Run. Що варто знати:
-- `CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]` слухає **8000**, а Cloud Run
-  за замовчуванням чекає 8080 (`$PORT`). Найпростіше задати `--port 8000` у `gcloud run deploy`.
-  Інший варіант — shell-форма CMD з `${PORT:-8000}`.
+- ~~`CMD [... "--port", "8000"]` слухає тільки 8000.~~ Зроблено (див. п. 7): CMD у shell-формі
+  `exec uvicorn ... --port ${PORT:-8000}`, тож порт береться з `$PORT`, а без нього лишається 8000.
 - `ENTRYPOINT entrypoint.sh` запускає `alembic upgrade head`, коли `RUN_MIGRATIONS_ON_START` не дорівнює
   `false` (за замовчуванням `true`).
 - `ARG INSTALL_DEV=false`: для проду dev-залежності не ставляться. Тоді `boto3` не потрапляє в образ,
@@ -90,8 +89,8 @@ Zip використовує тільки mailer звіту (`infra/lambda/repor
   `RUN_MIGRATIONS_ON_START`, `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`,
   `COGNITO_JWKS` (необов'язкова). Змінні `PARSER_*` ядру не потрібні.
 - **ORM:** SQLAlchemy 2 async + **asyncpg** (`backend/app/db.py`). Один модульний `create_async_engine`
-  з `pool_pre_ping=True` і стандартним пулом (5 + 10 overflow на процес). Розмір пулу в налаштуваннях
-  не винесено. Увесь код асинхронний.
+  з `pool_pre_ping=True` і пулом `DB_POOL_SIZE` + `DB_MAX_OVERFLOW` (`Settings`, за замовчуванням
+  5 + 10, як у SQLAlchemy; на Cloud Run 2 + 3, див. п. 7). Увесь код асинхронний.
 - **Міграції: Alembic**, `backend/alembic/` (`0001_create_meetings`, `0002_users_and_meeting_owner`,
   `0003_meeting_agenda`). `alembic/env.py` бере URL з `settings.database_url` (async engine, `NullPool`),
   тож Alembic і застосунок читають ту саму змінну.
@@ -213,3 +212,91 @@ the server»**. Без токена відповідь — 401. Режиму о�
     Pub/Sub + Cloud Run Job). Задокументувати рішення.
 13. Прибирання (необов'язково): `mangum` і `Dockerfile.lambda` потрібні, поки працюють Lambda-воркери
     звіту й парсера; не видаляти, поки вони живі. Виправити застарілі згадки Aurora.
+
+## 7. Бекенд на Cloud Run (виконано 2026-11-18)
+
+Lambda-частину (`mangum`, `Dockerfile.lambda`, `app/lambda_handler.py`) **не видаляли**: з того самого
+образу на AWS і далі працюють report builder і agenda parser.
+
+### Зміни в коді
+
+- `backend/Dockerfile`: `CMD exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}`
+  (shell-форма). `ENTRYPOINT entrypoint.sh` не змінювався. `exec` залишає uvicorn процесом PID 1
+  (перевірено через `/proc/1/cmdline`), тож SIGTERM від Cloud Run доходить до нього. Попередження
+  `JSONArgsRecommended` під час збірки очікуване. Compose перевизначає `command:` (`--reload`, :8000),
+  а Job `spry-migrate` перевизначає тільки `args`, тому обидва працюють як раніше.
+- `backend/app/config.py`: `db_pool_size = 5`, `db_max_overflow = 10` (env `DB_POOL_SIZE`,
+  `DB_MAX_OVERFLOW`). `backend/app/db.py` передає їх у `create_async_engine`. Рушії з `NullPool`
+  (звіт, `suggestions`, Alembic) не змінювалися.
+- `gcp/run.tf`: у сервісі додано `DB_POOL_SIZE=2`, `DB_MAX_OVERFLOW=3`, тобто до 5 з'єднань на інстанс
+  і до 10 на 2 інстанси з ~25 у `db-f1-micro`. `container_port = 8000` лишився: Cloud Run передає
+  `PORT=8000`.
+- `gcp/terraform.tfvars`: `api_image` закріплено за digest.
+- `Makefile`: цілі `gcp-push`, `gcp-plan`, `gcp-deploy`, `gcp-migrate`, `gcp-url`, `gcp-logs`
+  (змінні `GCP_REGION`, `GCP_SERVICE`, `GCP_MIGRATE_JOB`, `GCP_IMAGE_NAME`, `API_IMAGE`,
+  `TF_APPLY_FLAGS`). На Windows вони викликають `gcloud.cmd`: bash-обгортка `gcloud` з Cloud SDK під
+  `MSYS_NO_PATHCONV=1` (його експортує Makefile) передає Python шлях `/c/...` і падає з
+  `can't open file 'C:\\c\\Users\\...\\gcloud.py'`.
+- `gcp/versions.tf` і ADR 0008: `gcp/` застосовується локально через `make gcp-deploy` (local
+  execution). `infra/` як і раніше не застосовується з make.
+
+### Виконані команди (по порядку)
+
+```sh
+# 1. Збірка і локальна перевірка образу
+docker build --platform linux/amd64 -t spry-api backend/
+docker run -d --rm --name spry-api-test -e PORT=8080 -e RUN_MIGRATIONS_ON_START=false -p 8080:8080 spry-api
+curl -fsS localhost:8080/docs            # 200; лог: "Uvicorn running on http://0.0.0.0:8080"
+curl -fsS localhost:8080/openapi.json    # 200
+docker exec spry-api-test cat /proc/1/cmdline   # ... uvicorn app.main:app --host 0.0.0.0 --port 8080
+docker stop spry-api-test
+
+# 2. Compose не зламався
+docker compose up -d --build db backend
+curl -fsS localhost:8000/health          # {"status":"ok","database":"ok","version":"1.0.0"}
+make test                                # 145 passed
+docker compose exec -T backend ruff check .   # All checks passed!
+
+# 3. Push в Artifact Registry
+make gcp-push
+#   = gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+#     docker build --platform linux/amd64 --provenance=false -f backend/Dockerfile \
+#       -t us-central1-docker.pkg.dev/spry-kvasovets-2026/spry/spry-api:latest ./backend
+#     docker push us-central1-docker.pkg.dev/spry-kvasovets-2026/spry/spry-api:latest
+#     gcloud artifacts docker images describe ...:latest --format 'value(image_summary.digest)'
+#   (репозиторій береться з terraform -chdir=gcp output -raw artifact_registry_repo_url)
+# -> api_image = "us-central1-docker.pkg.dev/spry-kvasovets-2026/spry/spry-api@sha256:b70f16afeaa2e9c033fd775ccfc5ce70a767958b5ad3a70019301260557cabeb"
+#    (вписано в gcp/terraform.tfvars)
+
+# 4. План: змінюються тільки сервіс і Job
+make gcp-plan                            # = terraform -chdir=gcp plan -input=false
+#   ~ google_cloud_run_v2_job.migrate      image: cloudrun/container/hello -> spry-api@sha256:b70f16af...
+#   ~ google_cloud_run_v2_service.api      image: те саме; + env DB_POOL_SIZE=2, DB_MAX_OVERFLOW=3
+#   Plan: 0 to add, 2 to change, 0 to destroy.
+
+# 5. Apply
+make gcp-deploy TF_APPLY_FLAGS=-auto-approve   # = terraform -chdir=gcp apply -input=false -auto-approve
+#   Apply complete! Resources: 0 added, 2 changed, 0 destroyed.
+#   https://spry-api-23u44bbqpa-uc.a.run.app
+
+# 6. Міграції (Крок 5)
+gcloud sql instances describe spry-db --format 'value(state,settings.activationPolicy)'  # RUNNABLE ALWAYS
+make gcp-migrate        # = gcloud run jobs execute spry-migrate --region us-central1 --wait
+#   Execution [spry-migrate-wzqpf] has successfully completed.
+
+# 7. Перевірка
+curl -sS https://spry-api-23u44bbqpa-uc.a.run.app/health
+#   {"status":"ok","database":"ok","version":"1.0.0"}   (HTTP 200, SELECT 1 у Cloud SQL пройшов)
+curl -sS https://spry-api-23u44bbqpa-uc.a.run.app/docs        # 200
+curl -sS https://spry-api-23u44bbqpa-uc.a.run.app/api/v1/me   # 401 "Sign in to continue." (Cognito працює)
+make gcp-url            # https://spry-api-23u44bbqpa-uc.a.run.app
+make gcp-logs LIMIT=8   # = gcloud run services logs read spry-api --region us-central1 --limit 8
+```
+
+З PowerShell ті самі цілі запускаються через `make`. Аргументи з `=` і `@` треба брати в лапки:
+`make gcp-deploy "API_IMAGE=us-central1-docker.pkg.dev/spry-kvasovets-2026/spry/spry-api@sha256:..."`.
+
+### Наступний деплой
+
+`make gcp-push`, далі вписати надрукований `api_image` у `gcp/terraform.tfvars`, потім `make gcp-plan`,
+`make gcp-deploy` (підтвердити `yes`) і `make gcp-migrate`.

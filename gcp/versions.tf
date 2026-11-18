@@ -2,7 +2,8 @@
 # separate from infra/ (AWS): its own HCP Terraform workspace and state, and no
 # references to infra/. The workspace runs in Local execution mode with the
 # owner's Application Default Credentials; Workload Identity Federation for
-# remote runs is a later step. No make target applies.
+# remote runs is a later step. `make gcp-deploy` applies it locally (infra/ is
+# still never applied from here).
 
 terraform {
   required_version = ">= 1.10"

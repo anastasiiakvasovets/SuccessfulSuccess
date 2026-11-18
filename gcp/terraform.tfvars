@@ -4,6 +4,9 @@
 project_id = "spry-kvasovets-2026"
 region     = "us-central1"
 
+# The API image (backend/Dockerfile), pinned by digest: printed by make gcp-push.
+api_image = "us-central1-docker.pkg.dev/spry-kvasovets-2026/spry/spry-api@sha256:b70f16afeaa2e9c033fd775ccfc5ce70a767958b5ad3a70019301260557cabeb"
+
 # Cognito stays on AWS (infra/auth.tf, outputs user_pool_id / user_pool_client_id).
 cognito_region       = "us-east-1"
 cognito_user_pool_id = "us-east-1_xgnKmaDDO"

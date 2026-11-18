@@ -83,6 +83,27 @@ stack-output = $(AWS) cloudformation describe-stacks --stack-name $(1) \
 # $(call tf-output,<output name>): one output of the Terraform config (infra/outputs.tf)
 tf-output = $(TF) -chdir=$(TF_DIR) output -raw $(1)
 
+# Lab 9 (ADR 0008): Spry's core on Google Cloud, Terraform in gcp/ (HCP workspace
+# spry-gcp, local execution with the owner's Application Default Credentials).
+# Unlike infra/, gcp/ is applied locally: make gcp-deploy.
+# On Windows the Cloud SDK's bash wrapper (gcloud) breaks under MSYS_NO_PATHCONV
+# above (it hands Python a /c/... path), so call the cmd wrapper instead.
+ifeq ($(OS),Windows_NT)
+GCLOUD ?= gcloud.cmd
+else
+GCLOUD ?= gcloud
+endif
+GCP_TF_DIR ?= gcp
+GCP_REGION ?= us-central1
+GCP_SERVICE ?= spry-api
+GCP_MIGRATE_JOB ?= spry-migrate
+GCP_IMAGE_NAME ?= spry-api
+# The image comes from gcp/terraform.tfvars (api_image, pinned by digest);
+# make gcp-deploy API_IMAGE=<repo>/spry-api@sha256:... overrides it once.
+GCP_TF_VARS = $(if $(API_IMAGE),-var "api_image=$(API_IMAGE)")
+# $(call gcp-tf-output,<output name>): one output of gcp/outputs.tf
+gcp-tf-output = $(TF) -chdir=$(GCP_TF_DIR) output -raw $(1)
+
 # CloudFormation refuses to update a stack that is still busy, and a Lambda in a
 # VPC can keep one in *_CLEANUP_IN_PROGRESS for ~20 minutes while its network
 # interfaces are released. Wait that out instead of failing.
@@ -146,6 +167,7 @@ endef
         aws-frontend-cert aws-deploy-frontend aws-frontend-url report-now dlq-status \
         aws-ai-url aws-logs-ai \
         infra-init infra-fmt infra-validate infra-plan \
+        gcp-push gcp-plan gcp-deploy gcp-migrate gcp-url gcp-logs \
         aws-destroy
 
 help:
@@ -461,6 +483,39 @@ infra-validate: ## Check the Terraform configuration in infra/
 
 infra-plan: ## Preview what HCP Terraform would change (never applies)
 	$(TF) -chdir=$(TF_DIR) plan -input=false
+
+# --- Google Cloud (Lab 9): the API on Cloud Run ------------------------------
+
+gcp-push: ## Build the API image (backend/Dockerfile) and push it to Artifact Registry; prints the api_image line
+	@repo=$$($(call gcp-tf-output,artifact_registry_repo_url) 2>/dev/null | tr -d '[:space:]'); \
+		test -n "$$repo" || { echo "No artifact_registry_repo_url output — run: terraform -chdir=$(GCP_TF_DIR) init"; exit 1; }; \
+		image="$$repo/$(GCP_IMAGE_NAME)"; \
+		echo "Pushing $$image:$(IMAGE_TAG) (linux/amd64)"; \
+		$(GCLOUD) auth configure-docker "$${repo%%/*}" --quiet || exit 1; \
+		docker build --platform linux/amd64 --provenance=false \
+			-f backend/Dockerfile -t "$$image:$(IMAGE_TAG)" ./backend || exit 1; \
+		docker push "$$image:$(IMAGE_TAG)" || exit 1; \
+		digest=$$($(GCLOUD) artifacts docker images describe "$$image:$(IMAGE_TAG)" \
+			--format 'value(image_summary.digest)' | tr -d '[:space:]'); \
+		case "$$digest" in sha256:*) ;; *) echo "Could not read the digest of $$image:$(IMAGE_TAG)"; exit 1 ;; esac; \
+		echo "Put this in $(GCP_TF_DIR)/terraform.tfvars, then make gcp-plan / gcp-deploy:"; \
+		echo "api_image = \"$$image@$$digest\""
+
+gcp-plan: ## Preview the Terraform changes in gcp/
+	$(TF) -chdir=$(GCP_TF_DIR) plan -input=false $(GCP_TF_VARS)
+
+gcp-deploy: ## Apply gcp/ (image from terraform.tfvars, or API_IMAGE=...); asks for confirmation unless TF_APPLY_FLAGS=-auto-approve
+	$(TF) -chdir=$(GCP_TF_DIR) apply -input=false $(GCP_TF_VARS) $(TF_APPLY_FLAGS)
+	@$(MAKE) --no-print-directory gcp-url
+
+gcp-migrate: ## Apply database migrations on Cloud SQL (runs the spry-migrate job and waits)
+	$(GCLOUD) run jobs execute $(GCP_MIGRATE_JOB) --region $(GCP_REGION) --wait
+
+gcp-url: ## Print the Cloud Run API URL
+	@$(call gcp-tf-output,cloud_run_url); echo
+
+gcp-logs: ## Show the latest API logs from Cloud Run: make gcp-logs LIMIT=100
+	$(GCLOUD) run services logs read $(GCP_SERVICE) --region $(GCP_REGION) --limit $(or $(LIMIT),50)
 
 aws-destroy: ## Delete the CloudFormation stacks, including the database and its data
 	$(require-aws-credentials)

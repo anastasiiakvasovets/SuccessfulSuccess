@@ -16,8 +16,9 @@ resource "google_cloud_run_v2_service" "api" {
   template {
     service_account = google_service_account.api.email
 
-    # db-f1-micro allows ~25 connections, and one instance can open up to 15
-    # (SQLAlchemy's default pool 5 + overflow 10), so at most 2 instances.
+    # db-f1-micro allows ~25 connections. Each instance opens at most
+    # DB_POOL_SIZE + DB_MAX_OVERFLOW = 5 (below), so 2 instances use 10 and
+    # leave room for the migration job and psql.
     scaling {
       min_instance_count = 0
       max_instance_count = 2
@@ -33,8 +34,8 @@ resource "google_cloud_run_v2_service" "api" {
     containers {
       image = var.api_image
 
-      # backend/Dockerfile listens on 8000. Cloud Run sets PORT=8000, which the
-      # placeholder image honours too.
+      # Cloud Run sets PORT=8000; backend/Dockerfile's CMD listens on ${PORT:-8000}
+      # (as does the placeholder image).
       ports {
         container_port = 8000
       }
@@ -69,6 +70,15 @@ resource "google_cloud_run_v2_service" "api" {
       env {
         name  = "APP_TIMEZONE"
         value = "Europe/Kyiv"
+      }
+      # Smaller than the app's defaults (5 + 10), see scaling above.
+      env {
+        name  = "DB_POOL_SIZE"
+        value = "2"
+      }
+      env {
+        name  = "DB_MAX_OVERFLOW"
+        value = "3"
       }
       env {
         name  = "CORS_ORIGINS"

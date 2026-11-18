@@ -144,8 +144,9 @@ If GCP code has to send mail later, the alternative is **SendGrid or Mailgun** o
   - **Locally:** Terraform in `gcp/` runs with the owner's Application Default Credentials
     (`gcloud auth application-default login`), without impersonation. Impersonating `terraform@`
     (it needs `roles/iam.serviceAccountTokenCreator` for the owner's user) is an optional
-    improvement, not a requirement: plans would then run with exactly the roles above. As in
-    `infra/`, no make target applies.
+    improvement, not a requirement: plans would then run with exactly the roles above. Until WIF is
+    set up, the workspace runs in local execution mode and `make gcp-deploy` applies `gcp/`
+    locally; `infra/` is still never applied from a make target.
   - **HCP Terraform (`spry-gcp`):** Workload Identity Federation. A pool with an OIDC provider for
     `app.terraform.io`, with an attribute condition that pins the organization
     `ooad-nastyakvasovets` **and** the workspace `spry-gcp`. That closes, on the GCP side, the gap
