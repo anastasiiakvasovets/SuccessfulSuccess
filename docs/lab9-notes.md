@@ -300,3 +300,55 @@ make gcp-logs LIMIT=8   # = gcloud run services logs read spry-api --region us-c
 
 `make gcp-push`, далі вписати надрукований `api_image` у `gcp/terraform.tfvars`, потім `make gcp-plan`,
 `make gcp-deploy` (підтвердити `yes`) і `make gcp-migrate`.
+
+## 8. Фронтенд на Firebase Hosting (виконано 2026-11-18)
+
+**Hosting URL: https://spry-kvasovets-2026.web.app** (також `https://spry-kvasovets-2026.firebaseapp.com`).
+
+### Файли
+
+- `firebase.json` (корінь): `"public": "frontend/out"`, rewrite
+  `{"source": "/api/**", "run": {"serviceId": "spry-api", "region": "us-central1"}}`.
+  `trailingSlash` не задано (маршрути FastAPI без кінцевого слеша, див. п. 4), SPA-fallback і
+  `cleanUrls` не потрібні: Next з `trailingSlash: true` сам пише `route/index.html`.
+- `.firebaserc`: `default` = `spry-kvasovets-2026`. `.gitignore`: `.firebase/`, `firebase-debug.log`.
+- `Makefile`: `gcp-deploy-frontend`, `gcp-frontend-url`; змінні `FIREBASE` (`firebase.cmd` на
+  Windows, з тієї ж причини, що й `gcloud.cmd`) і `GCP_PROJECT`.
+
+`make gcp-deploy-frontend` збирає статичний експорт тією самою стадією `export` з
+`frontend/Dockerfile`, що й `aws-deploy-frontend`, але з:
+- `NEXT_PUBLIC_API_BASE_URL=""`: запити відносні (`/api/v1/...`), той самий origin, CORS не потрібен;
+- `NEXT_PUBLIC_COGNITO_*` з outputs `infra/` (ті самі, що на AWS);
+- `NEXT_PUBLIC_PARSER_URL=""`: кнопка "Paste an agenda" прихована.
+
+Далі `firebase deploy --only hosting --project spry-kvasovets-2026 --non-interactive`. Деплой іде від
+імені користувача, залогіненого в Firebase CLI (`firebase login`), не через Terraform.
+
+### Перевірка
+
+```sh
+curl -sS -o /dev/null -w '%{http_code}' https://spry-kvasovets-2026.web.app/         # 200 text/html
+curl -sS -o /dev/null -w '%{http_code}' https://spry-kvasovets-2026.web.app/login/   # 200
+curl -sS https://spry-kvasovets-2026.web.app/api/v1/me
+#   {"error":{"code":"unauthorized","message":"Sign in to continue.","details":[]}}  HTTP 401
+#   (відповідь FastAPI, тобто rewrite до Cloud Run працює)
+grep -rlE 'lambda-url|localhost:8000' frontend/out   # нічого: бандл не знає старого API
+```
+
+### Cognito і CORS парсера (Крок 6b)
+
+Щоб вхід працював на новому домені, обидва Firebase-origin додано в `local.site_origins`
+(`infra/versions.tf`) через нову змінну `extra_site_origins` (`infra/variables.tf`, значення в
+`infra/terraform.tfvars`). Звідти беруться callback/logout URLs app client (`auth.tf`) і CORS
+function URL парсера (`ai.tf`). `make infra-plan`:
+
+```
+~ aws_cognito_user_pool_client.web   callback_urls +2, logout_urls +2
+~ aws_lambda_function_url.parser     cors.allow_origins +2
+Plan: 0 to add, 2 to change, 0 to destroy.
+```
+
+Застосує HCP Terraform після merge у `main`. **До того вхід на web.app падає з `redirect_mismatch`.**
+Після apply парсер теж прийматиме запити з Firebase-origin, тож кнопку можна повернути, зібравши
+фронтенд з `NEXT_PUBLIC_PARSER_URL` = output `parser_url` (зараз `gcp-deploy-frontend` передає
+порожній рядок).
