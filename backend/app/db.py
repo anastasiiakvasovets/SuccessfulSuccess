@@ -12,7 +12,13 @@ class Base(DeclarativeBase):
     """Declarative base for every ORM model."""
 
 
-engine = create_async_engine(settings.database_url, echo=False, pool_pre_ping=True)
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    pool_pre_ping=True,
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
+)
 
 SessionFactory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
 

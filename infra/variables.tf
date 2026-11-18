@@ -16,6 +16,12 @@ variable "local_origin" {
   description = "The dev server's origin, allowed next to the CloudFront site."
 }
 
+variable "extra_site_origins" {
+  type        = list(string)
+  default     = []
+  description = "Other origins the site is served from (Lab 9: Firebase Hosting), each https://host with no trailing slash. Added to the Cognito callback/logout URLs and the parser's CORS."
+}
+
 # --- auth ---------------------------------------------------------------------
 
 variable "domain_prefix" {

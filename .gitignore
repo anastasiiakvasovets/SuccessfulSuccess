@@ -32,3 +32,13 @@ crash.log
 *.auto.tfvars.secret
 # secrets and email addresses for local runs, written from .env
 infra/secrets.auto.tfvars
+# gcp/ (Lab 9): covered by the rules above, listed for clarity. Not
+# gcp/.terraform*, which would also ignore gcp/.terraform.lock.hcl.
+gcp/.terraform/
+gcp/*.tfstate
+gcp/*.tfstate.*
+gcp/*.tfplan
+
+# firebase deploy (Lab 9): the CLI's upload cache and its debug log
+.firebase/
+firebase-debug.log

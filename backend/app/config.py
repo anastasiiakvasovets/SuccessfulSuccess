@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     run_migrations_on_start: bool = True
     version: str = Field(default="1.0.0")
 
+    # The API's connection pool per process (SQLAlchemy's defaults). Cloud Run
+    # sets smaller values: db-f1-micro allows only ~25 connections in total.
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+
     # Cognito user pool whose access tokens the API accepts. Empty pool id means
     # authentication is not configured, and every meetings request is refused.
     cognito_region: str = "us-east-1"

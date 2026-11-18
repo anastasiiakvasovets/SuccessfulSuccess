@@ -70,7 +70,8 @@ locals {
   # is ever created from scratch (every aws_lambda_function ignores image_uri).
   image_uri = var.image_uri != "" ? var.image_uri : "${data.aws_cloudformation_stack.ecr.outputs["RepositoryUri"]}:latest"
 
-  # Every origin the site is served from: the CloudFront site and the dev server.
+  # Every origin the site is served from: the CloudFront site, Firebase Hosting
+  # (var.extra_site_origins, Lab 9) and the dev server.
   site_origin  = "https://${data.aws_cloudformation_stack.frontend.outputs["DistributionDomain"]}"
-  site_origins = [local.site_origin, var.local_origin]
+  site_origins = concat([local.site_origin], var.extra_site_origins, [var.local_origin])
 }

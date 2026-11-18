@@ -7,6 +7,11 @@
 project_name = "successfulsuccess"
 aws_region   = "us-east-1"
 local_origin = "http://localhost:3000"
+# Lab 9: the frontend on Firebase Hosting (ADR 0008)
+extra_site_origins = [
+  "https://spry-kvasovets-2026.web.app",
+  "https://spry-kvasovets-2026.firebaseapp.com",
+]
 
 # auth
 domain_prefix    = "kvasovets"
