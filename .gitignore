@@ -38,3 +38,7 @@ gcp/.terraform/
 gcp/*.tfstate
 gcp/*.tfstate.*
 gcp/*.tfplan
+
+# firebase deploy (Lab 9): the CLI's upload cache and its debug log
+.firebase/
+firebase-debug.log

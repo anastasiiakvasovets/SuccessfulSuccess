@@ -90,9 +90,12 @@ tf-output = $(TF) -chdir=$(TF_DIR) output -raw $(1)
 # above (it hands Python a /c/... path), so call the cmd wrapper instead.
 ifeq ($(OS),Windows_NT)
 GCLOUD ?= gcloud.cmd
+FIREBASE ?= firebase.cmd
 else
 GCLOUD ?= gcloud
+FIREBASE ?= firebase
 endif
+GCP_PROJECT ?= spry-kvasovets-2026
 GCP_TF_DIR ?= gcp
 GCP_REGION ?= us-central1
 GCP_SERVICE ?= spry-api
@@ -167,7 +170,7 @@ endef
         aws-frontend-cert aws-deploy-frontend aws-frontend-url report-now dlq-status \
         aws-ai-url aws-logs-ai \
         infra-init infra-fmt infra-validate infra-plan \
-        gcp-push gcp-plan gcp-deploy gcp-migrate gcp-url gcp-logs \
+        gcp-push gcp-plan gcp-deploy gcp-migrate gcp-url gcp-logs gcp-deploy-frontend gcp-frontend-url \
         aws-destroy
 
 help:
@@ -516,6 +519,30 @@ gcp-url: ## Print the Cloud Run API URL
 
 gcp-logs: ## Show the latest API logs from Cloud Run: make gcp-logs LIMIT=100
 	$(GCLOUD) run services logs read $(GCP_SERVICE) --region $(GCP_REGION) --limit $(or $(LIMIT),50)
+
+# The site and the API share the Firebase origin (firebase.json rewrites /api/**
+# to the Cloud Run service), so the bundle calls relative /api/v1/... URLs:
+# NEXT_PUBLIC_API_BASE_URL is the empty string on purpose. Sign-in stays Cognito
+# (infra/ outputs). The parser on AWS is hidden until its CORS lists this origin.
+gcp-deploy-frontend: ## Build the static export for Firebase Hosting (API on the same origin) and deploy it
+	@tf_out() { $(call tf-output,$$1) 2>/dev/null | tr -d '[:space:]'; }; \
+		pool=$$(tf_out user_pool_id); \
+		test -n "$$pool" || echo "No Terraform outputs (make infra-init?) — building without sign-in"; \
+		echo "Building the static export (API on the same origin)"; \
+		rm -rf frontend/out; \
+		docker build --target export --output type=local,dest=frontend/out \
+			--build-arg NEXT_PUBLIC_API_BASE_URL="" \
+			--build-arg NEXT_PUBLIC_COGNITO_USER_POOL_ID="$$pool" \
+			--build-arg NEXT_PUBLIC_COGNITO_CLIENT_ID="$$(tf_out user_pool_client_id)" \
+			--build-arg NEXT_PUBLIC_COGNITO_DOMAIN="$$(tf_out hosted_domain)" \
+			--build-arg NEXT_PUBLIC_COGNITO_GOOGLE_ENABLED="$$(tf_out google_enabled)" \
+			--build-arg NEXT_PUBLIC_PARSER_URL="" \
+			./frontend || exit 1; \
+		test -f frontend/out/index.html || { echo "frontend/out/index.html is missing — the build failed"; exit 1; }
+	$(FIREBASE) deploy --only hosting --project $(GCP_PROJECT) --non-interactive
+
+gcp-frontend-url: ## Print the Firebase Hosting URL
+	@echo "https://$(GCP_PROJECT).web.app"
 
 aws-destroy: ## Delete the CloudFormation stacks, including the database and its data
 	$(require-aws-credentials)
